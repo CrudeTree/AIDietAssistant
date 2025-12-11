@@ -3,6 +3,7 @@ package com.matchpoint.myaidietapp.model
 import com.google.firebase.Timestamp
 
 enum class DietType {
+    NO_DIET,
     CARNIVORE,
     KETO,
     VEGAN,
@@ -50,7 +51,8 @@ data class FoodItem(
     val quantity: Int = 1,
     val photoUrl: String? = null,
     val labelUrl: String? = null,
-    val notes: String? = null
+    val notes: String? = null,
+    val rating: Int? = null
 )
 
 data class UserProfile(

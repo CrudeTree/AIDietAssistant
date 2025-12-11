@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -22,6 +24,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -37,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.matchpoint.myaidietapp.model.HungerLevel
 import com.matchpoint.myaidietapp.model.MessageSender
@@ -77,7 +81,9 @@ fun DigitalStomachApp() {
             )
             showProfile && state.profile != null -> ProfileScreen(
                 profile = state.profile!!,
-                onBack = { showProfile = false }
+                onBack = { showProfile = false },
+                onDietChange = { vm.updateDiet(it) },
+                onRemoveFood = { vm.removeFoodItem(it) }
             )
             else -> HomeScreen(
                 state = state,
@@ -227,31 +233,6 @@ fun HomeScreen(
     var pendingCameraAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val nowMillis = System.currentTimeMillis()
     val mealDue = state.profile?.nextMealAtMillis?.let { nowMillis >= it } == true
-
-    val productPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia(),
-        onResult = { uri: Uri? ->
-            if (uri != null) {
-                scope.launch {
-                    val url = onUploadPhoto(morePendingFoodId, false, uri)
-                    moreProductUrl = url
-                }
-            }
-        }
-    )
-
-    val labelPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia(),
-        onResult = { uri: Uri? ->
-            if (uri != null) {
-                scope.launch {
-                    val url = onUploadPhoto(morePendingFoodId, true, uri)
-                    moreLabelUrl = url
-                }
-            }
-        }
-    )
-
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
         onResult = { granted ->
@@ -259,6 +240,61 @@ fun HomeScreen(
                 pendingCameraAction?.invoke()
                 pendingCameraAction = null
             }
+        }
+    )
+
+    fun ensureCameraPermissionAndRunForHome(action: () -> Unit) {
+        if (ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            action()
+        } else {
+            pendingCameraAction = action
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    fun finalizeFoodAfterPhotos() {
+        val qty = moreFoodQty.toIntOrNull() ?: 1
+        if (moreProductUrl != null) {
+            val safeName = moreFoodName.trim()
+            onAddFood(safeName, qty, moreProductUrl, moreLabelUrl)
+            // Reset fields for next item
+            moreFoodName = ""
+            moreFoodQty = "1"
+            moreProductUrl = null
+            moreLabelUrl = null
+            morePendingFoodId = UUID.randomUUID().toString()
+        }
+    }
+
+    fun ensureCameraPermissionAndRun(action: () -> Unit) {
+        if (ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            action()
+        } else {
+            pendingCameraAction = action
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    val labelCameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture(),
+        onResult = { success: Boolean ->
+            val uri = labelCameraUri
+            if (success && uri != null) {
+                scope.launch {
+                    val url = onUploadPhoto(morePendingFoodId, true, uri)
+                    moreLabelUrl = url
+                }
+            }
+            // Regardless of success, try to finalize the food using product photo (and label if present)
+            finalizeFoodAfterPhotos()
         }
     )
 
@@ -271,19 +307,16 @@ fun HomeScreen(
                     val url = onUploadPhoto(morePendingFoodId, false, uri)
                     moreProductUrl = url
                 }
-            }
-        }
-    )
-
-    val labelCameraLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicture(),
-        onResult = { success: Boolean ->
-            val uri = labelCameraUri
-            if (success && uri != null) {
-                scope.launch {
-                    val url = onUploadPhoto(morePendingFoodId, true, uri)
-                    moreLabelUrl = url
+                // After product photo, immediately offer label photo (optional)
+                ensureCameraPermissionAndRunForHome {
+                    val labelUri = createImageUri(context)
+                    labelCameraUri = labelUri
+                    labelCameraLauncher.launch(labelUri)
                 }
+            } else {
+                // If product photo failed, reset pending state
+                moreProductUrl = null
+                moreLabelUrl = null
             }
         }
     )
@@ -314,6 +347,19 @@ fun HomeScreen(
             }
         }
 
+        if (state.isProcessing) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Digital stomach is thinking…")
+            }
+        }
+
         Spacer(modifier = Modifier.height(16.dp))
 
         // Optional section to add more food items after onboarding
@@ -341,73 +387,16 @@ fun HomeScreen(
             )
             Spacer(modifier = Modifier.height(4.dp))
 
-            fun ensureCameraPermissionAndRun(action: () -> Unit) {
-                if (ContextCompat.checkSelfPermission(
-                        context,
-                        Manifest.permission.CAMERA
-                    ) == PackageManager.PERMISSION_GRANTED
-                ) {
-                    action()
-                } else {
-                    pendingCameraAction = action
-                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                }
-            }
-
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = {
-                    productPicker.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    )
-                }) {
-                    Text(if (moreProductUrl == null) "Add product photo" else "Product photo added")
-                }
-                OutlinedButton(onClick = {
-                    ensureCameraPermissionAndRun {
+                    ensureCameraPermissionAndRunForHome {
                         val uri = createImageUri(context)
                         productCameraUri = uri
                         productCameraLauncher.launch(uri)
                     }
                 }) {
-                    Text("Take product photo")
+                    Text("Take product photo (then label optional)")
                 }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = {
-                    labelPicker.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    )
-                }) {
-                    Text(if (moreLabelUrl == null) "Add label photo (optional)" else "Label photo added")
-                }
-                OutlinedButton(onClick = {
-                    ensureCameraPermissionAndRun {
-                        val uri = createImageUri(context)
-                        labelCameraUri = uri
-                        labelCameraLauncher.launch(uri)
-                    }
-                }) {
-                    Text("Take label photo")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-            Button(
-                onClick = {
-                    val qty = moreFoodQty.toIntOrNull() ?: 1
-                    if (moreFoodName.isNotBlank() && moreProductUrl != null) {
-                        onAddFood(moreFoodName.trim(), qty, moreProductUrl, moreLabelUrl)
-                        moreFoodName = ""
-                        moreFoodQty = "1"
-                        moreProductUrl = null
-                        moreLabelUrl = null
-                        morePendingFoodId = UUID.randomUUID().toString()
-                    }
-                },
-                modifier = Modifier.align(Alignment.End)
-            ) {
-                Text("Add food")
             }
 
             val items = state.profile?.foodItems ?: emptyList()
@@ -419,11 +408,37 @@ fun HomeScreen(
                     fontWeight = FontWeight.SemiBold
                 )
                 items.forEach { item ->
+                    val rating = item.rating
+                    val ratingColor = when {
+                        rating == null -> MaterialTheme.colorScheme.onSurfaceVariant
+                        rating <= 3 -> Color(0xFFB00020) // red
+                        rating <= 6 -> Color(0xFFFFC107) // yellow/amber
+                        rating <= 9 -> Color(0xFF4CAF50) // green
+                        else -> Color(0xFF1B5E20)       // dark green
+                    }
+
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("- ${item.name} x${item.quantity}")
+                        Text(
+                            text = item.name,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            text = "x${item.quantity}",
+                            modifier = Modifier.padding(end = 8.dp),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            text = rating?.let { "${it}/10" } ?: "-/10",
+                            modifier = Modifier.padding(end = 8.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = ratingColor
+                        )
                         OutlinedButton(onClick = { onRemoveFood(item.id) }) {
                             Text("X")
                         }

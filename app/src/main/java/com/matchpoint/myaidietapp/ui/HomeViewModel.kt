@@ -30,7 +30,8 @@ data class UiState(
     val todaySchedule: ScheduledMealDay? = null,
     val messages: List<MessageEntry> = emptyList(),
     val introPending: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val isProcessing: Boolean = false
 )
 
 class HomeViewModel(
@@ -152,19 +153,87 @@ class HomeViewModel(
     fun addFoodItemSimple(name: String, quantity: Int, productUrl: String?, labelUrl: String?) {
         viewModelScope.launch {
             try {
+                _uiState.value = _uiState.value.copy(isProcessing = true)
                 val current = userRepo.getUserProfile() ?: return@launch
-                val newItem = FoodItem(
-                    id = UUID.randomUUID().toString(),
-                    name = name,
-                    quantity = quantity,
-                    photoUrl = productUrl,
-                    labelUrl = labelUrl
-                )
-                val updated = current.copy(foodItems = current.foodItems + newItem)
-                userRepo.saveUserProfile(updated)
-                _uiState.value = _uiState.value.copy(profile = updated)
+                val diet = current.dietType
+
+                if (productUrl == null) {
+                    Log.e("DigitalStomach", "addFoodItemSimple called with null productUrl – upload may have failed")
+                    return@launch
+                }
+
+                val analysis = runCatching {
+                    proxyRepo.analyzeFood(
+                        productUrl = productUrl,
+                        labelUrl = labelUrl,
+                        dietType = diet
+                    )
+                }.onFailure { e ->
+                    Log.e("DigitalStomach", "analyzeFood failed", e)
+                }.getOrElse { e ->
+                    // Fallback analysis object when the proxy is unavailable
+                    null
+                }
+
+                if (analysis != null) {
+                    val debugMessage = "Food '${analysis.normalizedName}' rated ${analysis.rating}/10: " +
+                        "${analysis.summary} (concerns: ${analysis.concerns}) " +
+                        if (analysis.accepted) "[ACCEPTED]" else "[REJECTED]"
+
+                    val aiEntry = MessageEntry(
+                        id = UUID.randomUUID().toString(),
+                        sender = MessageSender.AI,
+                        text = debugMessage
+                    )
+                    messagesRepo.appendMessage(aiEntry)
+
+                    if (analysis.accepted) {
+                        val newItem = FoodItem(
+                            id = UUID.randomUUID().toString(),
+                            name = analysis.normalizedName.ifBlank { name },
+                            quantity = quantity,
+                            photoUrl = productUrl,
+                            labelUrl = labelUrl,
+                            notes = "${analysis.summary} | Concerns: ${analysis.concerns}",
+                            rating = analysis.rating
+                        )
+                        val updated = current.copy(foodItems = current.foodItems + newItem)
+                        userRepo.saveUserProfile(updated)
+                        val updatedLog = messagesRepo.getMessageLog().log
+                        _uiState.value = _uiState.value.copy(profile = updated, messages = updatedLog)
+                    } else {
+                        val updatedLog = messagesRepo.getMessageLog().log
+                        _uiState.value = _uiState.value.copy(profile = current, messages = updatedLog)
+                    }
+                } else {
+                    // If analysis totally failed, still add the food so the user sees progress.
+                    val fallbackItem = FoodItem(
+                        id = UUID.randomUUID().toString(),
+                        name = name,
+                        quantity = quantity,
+                        photoUrl = productUrl,
+                        labelUrl = labelUrl,
+                        notes = "AI analysis unavailable – added without rating.",
+                        rating = null
+                    )
+                    val updated = current.copy(foodItems = current.foodItems + fallbackItem)
+                    userRepo.saveUserProfile(updated)
+
+                    val aiEntry = MessageEntry(
+                        id = UUID.randomUUID().toString(),
+                        sender = MessageSender.AI,
+                        text = "Couldn’t analyze that food right now, so I added it without a rating."
+                    )
+                    messagesRepo.appendMessage(aiEntry)
+
+                    val updatedLog = messagesRepo.getMessageLog().log
+                    _uiState.value = _uiState.value.copy(profile = updated, messages = updatedLog)
+                }
             } catch (e: Exception) {
+                Log.e("DigitalStomach", "addFoodItemSimple failed", e)
                 _uiState.value = _uiState.value.copy(error = e.message)
+            } finally {
+                _uiState.value = _uiState.value.copy(isProcessing = false)
             }
         }
     }
@@ -193,6 +262,18 @@ class HomeViewModel(
         viewModelScope.launch {
             try {
                 userRepo.removeFoodItem(foodId)
+                val updatedProfile = userRepo.getUserProfile()
+                _uiState.value = _uiState.value.copy(profile = updatedProfile)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message)
+            }
+        }
+    }
+
+    fun updateDiet(dietType: DietType) {
+        viewModelScope.launch {
+            try {
+                userRepo.updateDietType(dietType)
                 val updatedProfile = userRepo.getUserProfile()
                 _uiState.value = _uiState.value.copy(profile = updatedProfile)
             } catch (e: Exception) {
@@ -304,6 +385,7 @@ class HomeViewModel(
         if (message.isBlank()) return
         viewModelScope.launch {
             try {
+                _uiState.value = _uiState.value.copy(isProcessing = true)
                 val userEntry = MessageEntry(
                     id = UUID.randomUUID().toString(),
                     sender = MessageSender.USER,
@@ -375,6 +457,8 @@ class HomeViewModel(
                 )
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(error = e.message)
+            } finally {
+                _uiState.value = _uiState.value.copy(isProcessing = false)
             }
         }
     }
@@ -476,5 +560,3 @@ class HomeViewModel(
         )
     }
 }
-
-

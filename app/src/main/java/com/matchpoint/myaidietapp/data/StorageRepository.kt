@@ -7,12 +7,12 @@ import kotlinx.coroutines.tasks.await
 class StorageRepository(
     private val storage: FirebaseStorage = FirebaseStorage.getInstance()
 ) {
+    /**
+     * Uploads a file to Firebase Storage at the given [path] and returns the download URL.
+     */
     suspend fun uploadToPath(uri: Uri, path: String): String {
-        val ref = storage.getReference(path)
+        val ref = storage.reference.child(path)
         ref.putFile(uri).await()
         return ref.downloadUrl.await().toString()
     }
 }
-
-
-
