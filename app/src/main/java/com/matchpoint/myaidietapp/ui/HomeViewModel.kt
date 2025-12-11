@@ -65,17 +65,26 @@ class HomeViewModel(
         try {
             val profile = userRepo.getUserProfile()
             if (profile == null) {
-                _uiState.value = UiState(isLoading = false, profile = null, todaySchedule = null, messages = emptyList())
+                _uiState.value = UiState(
+                    isLoading = false,
+                    profile = null,
+                    todaySchedule = null,
+                    messages = emptyList()
+                )
                 return
             }
+
             val todayDate = LocalDate.now(zoneId)
             val todayId = todayDate.toString()
             val schedule = scheduleRepo.getDaySchedule(todayId)
                 ?: dailyPlanner.planForDay(todayDate, profile).also {
                     scheduleRepo.saveDaySchedule(it)
                 }
-            notificationScheduler?.scheduleForDay(schedule)
+            if (profile.autoPilotEnabled) {
+                notificationScheduler?.scheduleForDay(schedule)
+            }
             val messages = messagesRepo.getMessageLog().log
+
             _uiState.value = UiState(
                 isLoading = false,
                 profile = profile,
@@ -83,8 +92,6 @@ class HomeViewModel(
                 messages = messages
             )
 
-            // If a check-in is overdue and user hasn't been poked recently,
-            // auto-generate a gentle "how you feeling" message.
             maybeAutoCheckIn(profile)
         } catch (e: Exception) {
             _uiState.value = _uiState.value.copy(isLoading = false, error = e.message)
@@ -116,8 +123,15 @@ class HomeViewModel(
 
                 val schedule = dailyPlanner.planForDay(LocalDate.now(zoneId), profile)
                 scheduleRepo.saveDaySchedule(schedule)
-                notificationScheduler?.scheduleForDay(schedule)
-                val firstMealTime = schedule.decidedMeals.minByOrNull { it.exactTimeMillis }?.exactTimeMillis
+                var firstMealTime: Long? = null
+                if (profile.autoPilotEnabled) {
+                    notificationScheduler?.scheduleForDay(schedule)
+                    firstMealTime = schedule.decidedMeals.minByOrNull { it.exactTimeMillis }?.exactTimeMillis
+                    userRepo.updateNextTimes(
+                        nextCheckInAt = null,
+                        nextMealAt = firstMealTime
+                    )
+                }
 
                 val welcomeMessage = MessageEntry(
                     id = UUID.randomUUID().toString(),
@@ -131,11 +145,6 @@ class HomeViewModel(
                 )
                 messagesRepo.appendMessage(welcomeMessage)
                 messagesRepo.appendMessage(introMessage)
-
-                userRepo.updateNextTimes(
-                    nextCheckInAt = null,
-                    nextMealAt = firstMealTime
-                )
 
                 _uiState.value = UiState(
                     isLoading = false,
@@ -157,28 +166,42 @@ class HomeViewModel(
                 val current = userRepo.getUserProfile() ?: return@launch
                 val diet = current.dietType
 
-                if (productUrl == null) {
-                    Log.e("DigitalStomach", "addFoodItemSimple called with null productUrl – upload may have failed")
-                    return@launch
-                }
-
                 val analysis = runCatching {
-                    proxyRepo.analyzeFood(
-                        productUrl = productUrl,
-                        labelUrl = labelUrl,
-                        dietType = diet
-                    )
+                    if (productUrl != null) {
+                        proxyRepo.analyzeFood(
+                            productUrl = productUrl,
+                            labelUrl = labelUrl,
+                            dietType = diet
+                        )
+                    } else {
+                        // Text-only path: analyze based on the typed food name
+                        proxyRepo.analyzeFoodByName(
+                            foodName = name,
+                            dietType = diet
+                        )
+                    }
                 }.onFailure { e ->
                     Log.e("DigitalStomach", "analyzeFood failed", e)
-                }.getOrElse { e ->
-                    // Fallback analysis object when the proxy is unavailable
-                    null
-                }
+                }.getOrElse { null }
 
                 if (analysis != null) {
-                    val debugMessage = "Food '${analysis.normalizedName}' rated ${analysis.rating}/10: " +
-                        "${analysis.summary} (concerns: ${analysis.concerns}) " +
-                        if (analysis.accepted) "[ACCEPTED]" else "[REJECTED]"
+                    val healthRating = analysis.rating
+                    val dietFitRating = analysis.dietFitRating ?: analysis.rating
+
+                    val debugMessage = buildString {
+                        append("Food '")
+                        append(analysis.normalizedName)
+                        append("' — health ")
+                        append(healthRating)
+                        append("/10, diet fit ")
+                        append(dietFitRating)
+                        append("/10. ")
+                        append(analysis.summary)
+                        if (analysis.concerns.isNotBlank()) {
+                            append(" Concerns: ")
+                            append(analysis.concerns)
+                        }
+                    }
 
                     val aiEntry = MessageEntry(
                         id = UUID.randomUUID().toString(),
@@ -194,8 +217,9 @@ class HomeViewModel(
                             quantity = quantity,
                             photoUrl = productUrl,
                             labelUrl = labelUrl,
-                            notes = "${analysis.summary} | Concerns: ${analysis.concerns}",
-                            rating = analysis.rating
+                            notes = analysis.summary,
+                            rating = healthRating,
+                            dietFitRating = dietFitRating
                         )
                         val updated = current.copy(foodItems = current.foodItems + newItem)
                         userRepo.saveUserProfile(updated)
@@ -206,7 +230,6 @@ class HomeViewModel(
                         _uiState.value = _uiState.value.copy(profile = current, messages = updatedLog)
                     }
                 } else {
-                    // If analysis totally failed, still add the food so the user sees progress.
                     val fallbackItem = FoodItem(
                         id = UUID.randomUUID().toString(),
                         name = name,
@@ -214,7 +237,8 @@ class HomeViewModel(
                         photoUrl = productUrl,
                         labelUrl = labelUrl,
                         notes = "AI analysis unavailable – added without rating.",
-                        rating = null
+                        rating = null,
+                        dietFitRating = null
                     )
                     val updated = current.copy(foodItems = current.foodItems + fallbackItem)
                     userRepo.saveUserProfile(updated)
@@ -282,99 +306,30 @@ class HomeViewModel(
         }
     }
 
-    fun sendHungerFeedback(level: HungerLevel) {
+    fun setAutoPilotEnabled(enabled: Boolean) {
         viewModelScope.launch {
             try {
-                userRepo.appendHungerSignal(level)
+                userRepo.updateAutoPilotEnabled(enabled)
+                var profile = userRepo.getUserProfile() ?: return@launch
 
-                val userMessage = MessageEntry(
-                    id = UUID.randomUUID().toString(),
-                    sender = MessageSender.USER,
-                    text = when (level) {
-                        HungerLevel.STILL_FULL -> "Still full"
-                        HungerLevel.LITTLE_HUNGRY -> "A little hungry"
-                        HungerLevel.STARVING -> "I'm starving"
-                    }
-                )
-                messagesRepo.appendMessage(userMessage)
-
-                val currentProfile = userRepo.getUserProfile()
-                val hungerLevels = currentProfile?.hungerSignals?.map { it.level } ?: emptyList()
-                val lastMeal = currentProfile?.mealHistory?.maxByOrNull { it.timestamp }
-
-                val minutesSinceMeal = lastMeal?.let {
-                    val now = Instant.now()
-                    val diffMillis = now.toEpochMilli() - it.timestamp.toDate().time
-                    diffMillis / 60_000
-                } ?: 90L
-
-                val now = Instant.now().toEpochMilli()
-                val nextMealAt = currentProfile?.nextMealAtMillis
-                val readyForMeal = nextMealAt != null && now >= nextMealAt
-                val hasMealHistory = currentProfile?.mealHistory?.isNotEmpty() == true
-
-                val replyText = when {
-                    level == HungerLevel.STILL_FULL -> {
-                        // Never trigger a feeding when the user says they are still full,
-                        // including the very first interaction.
-                        runCatching {
-                            proxyRepo.generateCheckIn(
-                                CheckInRequest(
-                                    lastMeal = lastMeal?.mealName ?: lastMeal?.items?.joinToString(),
-                                    hungerSummary = hungerLevels.takeLast(5).joinToString { it.name },
-                                    weightTrend = currentProfile?.let { estimateWeightTrend(it.weightHistory) },
-                                    minutesSinceMeal = minutesSinceMeal,
-                                    mode = "hunger_check"
-                                )
-                            )
-                        }.onFailure { e ->
-                            Log.e("DigitalStomach", "Check-in proxy failed", e)
-                        }.getOrElse { e ->
-                            "No service: ${e.message ?: "unknown error"}"
+                if (enabled) {
+                    val today = LocalDate.now(zoneId)
+                    val todayId = today.toString()
+                    val schedule = scheduleRepo.getDaySchedule(todayId)
+                        ?: dailyPlanner.planForDay(today, profile).also {
+                            scheduleRepo.saveDaySchedule(it)
                         }
-                    }
-                    level == HungerLevel.STARVING && !readyForMeal -> {
-                        "Not yet – hold tight. I’ll ping you when it’s time. If you can’t wait, sip water or black coffee."
-                    }
-                    readyForMeal && hasMealHistory && level != HungerLevel.STILL_FULL -> {
-                        val nextMeal = _uiState.value.todaySchedule?.decidedMeals
-                            ?.minByOrNull { it.exactTimeMillis }
-                        val mealSuggestion = nextMeal?.mealSuggestion ?: "Your planned meal is up now."
-                        userRepo.updateNextTimes(nextCheckInAt = scheduleFollowup(now), nextMealAt = null)
-                        "Feed time. $mealSuggestion"
-                    }
-                    else -> {
-                        // Remote-first via proxy; on failure, show error reason for debugging
-                        runCatching {
-                            proxyRepo.generateCheckIn(
-                                CheckInRequest(
-                                    lastMeal = lastMeal?.mealName ?: lastMeal?.items?.joinToString(),
-                                    hungerSummary = hungerLevels.takeLast(5).joinToString { it.name },
-                                    weightTrend = currentProfile?.let { estimateWeightTrend(it.weightHistory) },
-                                    minutesSinceMeal = minutesSinceMeal,
-                                    mode = "hunger_check"
-                                )
-                            )
-                        }.onFailure { e ->
-                            Log.e("DigitalStomach", "Check-in proxy failed", e)
-                        }.getOrElse { e ->
-                            "No service: ${e.message ?: "unknown error"}"
-                        }
-                    }
+                    notificationScheduler?.scheduleForDay(schedule)
+                    val firstMealTime = schedule.decidedMeals.minByOrNull { it.exactTimeMillis }?.exactTimeMillis
+                    userRepo.updateNextTimes(nextCheckInAt = null, nextMealAt = firstMealTime)
+                    profile = profile.copy(nextMealAtMillis = firstMealTime, autoPilotEnabled = true)
+                } else {
+                    profile = profile.copy(autoPilotEnabled = false)
+                    userRepo.saveUserProfile(profile)
+                    // We leave any already-scheduled WorkManager jobs; new days won't be scheduled while off.
                 }
 
-                val aiMessage = MessageEntry(
-                    id = UUID.randomUUID().toString(),
-                    sender = MessageSender.AI,
-                    text = replyText
-                )
-                messagesRepo.appendMessage(aiMessage)
-
-                val updatedLog = messagesRepo.getMessageLog().log
-                _uiState.value = _uiState.value.copy(
-                    profile = currentProfile,
-                    messages = updatedLog
-                )
+                _uiState.value = _uiState.value.copy(profile = profile)
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(error = e.message)
             }
@@ -397,25 +352,7 @@ class HomeViewModel(
                 val lastMeal = currentProfile?.mealHistory?.maxByOrNull { it.timestamp }
                 val hungerLevels = currentProfile?.hungerSignals?.map { it.level } ?: emptyList()
 
-                val inventorySummary = currentProfile?.let { profile ->
-                    buildString {
-                        if (profile.foodItems.isNotEmpty()) {
-                            append("Food items: ")
-                            append(profile.foodItems.joinToString { it.name })
-                            append(". ")
-                        }
-                        if (profile.inventory.isNotEmpty()) {
-                            append("Inventory counts: ")
-                            append(profile.inventory.entries.joinToString { "${it.key} x${it.value}" })
-                            append(". ")
-                        }
-                        if (profile.allowedFoods.isNotEmpty()) {
-                            append("Allowed foods: ")
-                            append(profile.allowedFoods.joinToString())
-                            append(". ")
-                        }
-                    }.ifBlank { null }
-                }
+                val inventorySummary = buildInventorySummary(currentProfile)
 
                 val minutesSinceMeal = lastMeal?.let {
                     val now = Instant.now()
@@ -533,7 +470,8 @@ class HomeViewModel(
                     hungerSummary = hungerLevels.takeLast(5).joinToString { it.name },
                     weightTrend = estimateWeightTrend(profile.weightHistory),
                     minutesSinceMeal = minutesSinceMeal,
-                    mode = "auto_poke"
+                    mode = "auto_poke",
+                    inventorySummary = buildInventorySummary(profile)
                 )
             )
         }.onFailure { e ->
@@ -558,5 +496,33 @@ class HomeViewModel(
             profile = updatedProfile,
             messages = updatedLog
         )
+    }
+
+    private fun buildInventorySummary(profile: UserProfile?): String? {
+        return profile?.let { p ->
+            buildString {
+                if (p.foodItems.isNotEmpty()) {
+                    append("Food items: ")
+                    append(p.foodItems.joinToString { item ->
+                        val health = item.rating?.let { r -> "H${r}/10" } ?: ""
+                        val diet = item.dietFitRating?.let { r -> "D${r}/10" } ?: ""
+                        listOf(item.name, health, diet)
+                            .filter { it.isNotBlank() }
+                            .joinToString(" ")
+                    })
+                    append(". ")
+                }
+                if (p.inventory.isNotEmpty()) {
+                    append("Inventory counts: ")
+                    append(p.inventory.entries.joinToString { "${it.key} x${it.value}" })
+                    append(". ")
+                }
+                if (p.allowedFoods.isNotEmpty()) {
+                    append("Allowed foods: ")
+                    append(p.allowedFoods.joinToString())
+                    append(". ")
+                }
+            }.ifBlank { null }
+        }
     }
 }

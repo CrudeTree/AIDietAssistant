@@ -65,6 +65,10 @@ class UserRepository(
         )
         saveUserProfile(updated)
     }
+
+    suspend fun updateAutoPilotEnabled(enabled: Boolean) {
+        userDoc.update("autoPilotEnabled", enabled).await()
+    }
 }
 
 class ScheduledMealsRepository(

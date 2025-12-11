@@ -5,6 +5,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,12 +20,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -55,7 +58,6 @@ import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.launch
 import android.net.Uri
-import androidx.compose.runtime.setValue
 
 
 @Composable
@@ -83,7 +85,8 @@ fun DigitalStomachApp() {
                 profile = state.profile!!,
                 onBack = { showProfile = false },
                 onDietChange = { vm.updateDiet(it) },
-                onRemoveFood = { vm.removeFoodItem(it) }
+                onRemoveFood = { vm.removeFoodItem(it) },
+                onAutoPilotChange = { vm.setAutoPilotEnabled(it) }
             )
             else -> HomeScreen(
                 state = state,
@@ -129,7 +132,8 @@ fun OnboardingScreen(
     var nameText by remember { mutableStateOf("") }
     var goalWeightText by remember { mutableStateOf("") }
     var weightText by remember { mutableStateOf("") }
-    var selectedDiet by remember { mutableStateOf(DietType.CARNIVORE) }
+    var selectedDiet by remember { mutableStateOf(DietType.NO_DIET) }
+    var dietExpanded by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -176,19 +180,50 @@ fun OnboardingScreen(
             fontWeight = FontWeight.SemiBold
         )
         Spacer(modifier = Modifier.height(4.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf(
-                DietType.CARNIVORE,
-                DietType.KETO,
-                DietType.OMNIVORE,
-                DietType.PALEO,
-                DietType.VEGAN,
-                DietType.VEGETARIAN,
-                DietType.OTHER
-            ).forEach { type ->
-                val selected = type == selectedDiet
-                OutlinedButton(onClick = { selectedDiet = type }) {
-                    Text(type.name.lowercase().replaceFirstChar { it.uppercase() })
+        Box(modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(
+                onClick = { dietExpanded = !dietExpanded },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val label = when (selectedDiet) {
+                        DietType.NO_DIET -> "No Diet"
+                        else -> selectedDiet.name.lowercase().replaceFirstChar { it.uppercase() }
+                    }
+                    Text(label)
+                    Text("▼")
+                }
+            }
+            DropdownMenu(
+                expanded = dietExpanded,
+                onDismissRequest = { dietExpanded = false },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                listOf(
+                    DietType.NO_DIET,
+                    DietType.CARNIVORE,
+                    DietType.KETO,
+                    DietType.OMNIVORE,
+                    DietType.PALEO,
+                    DietType.VEGAN,
+                    DietType.VEGETARIAN,
+                    DietType.OTHER
+                ).forEach { type ->
+                    val label = when (type) {
+                        DietType.NO_DIET -> "No Diet"
+                        else -> type.name.lowercase().replaceFirstChar { it.uppercase() }
+                    }
+                    DropdownMenuItem(
+                        text = { Text(label) },
+                        onClick = {
+                            dietExpanded = false
+                            selectedDiet = type
+                        }
+                    )
                 }
             }
         }
@@ -222,7 +257,6 @@ fun HomeScreen(
     var chatInput by remember { mutableStateOf("") }
     var expandFoods by remember { mutableStateOf(false) }
     var moreFoodName by remember { mutableStateOf("") }
-    var moreFoodQty by remember { mutableStateOf("1") }
     var moreProductUrl by remember { mutableStateOf<String?>(null) }
     var moreLabelUrl by remember { mutableStateOf<String?>(null) }
     var morePendingFoodId by remember { mutableStateOf(UUID.randomUUID().toString()) }
@@ -256,30 +290,19 @@ fun HomeScreen(
         }
     }
 
+    // Finalize a photo-based food submission by calling onAddFood
     fun finalizeFoodAfterPhotos() {
-        val qty = moreFoodQty.toIntOrNull() ?: 1
-        if (moreProductUrl != null) {
-            val safeName = moreFoodName.trim()
-            onAddFood(safeName, qty, moreProductUrl, moreLabelUrl)
+        val productUrl = moreProductUrl
+        if (productUrl != null) {
+            // If the user didn't type a name, use a generic placeholder;
+            // the AI will override with a normalizedName anyway.
+            val safeName = moreFoodName.trim().ifBlank { "Food item" }
+            onAddFood(safeName, 1, productUrl, moreLabelUrl)
             // Reset fields for next item
             moreFoodName = ""
-            moreFoodQty = "1"
             moreProductUrl = null
             moreLabelUrl = null
             morePendingFoodId = UUID.randomUUID().toString()
-        }
-    }
-
-    fun ensureCameraPermissionAndRun(action: () -> Unit) {
-        if (ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
-            action()
-        } else {
-            pendingCameraAction = action
-            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
@@ -293,7 +316,7 @@ fun HomeScreen(
                     moreLabelUrl = url
                 }
             }
-            // Regardless of success, try to finalize the food using product photo (and label if present)
+            // Regardless of success, try to finalize using product photo (and label if present)
             finalizeFoodAfterPhotos()
         }
     )
@@ -370,20 +393,36 @@ fun HomeScreen(
         if (expandFoods) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Give me more foods to play with:",
+                text = "Option 1: Type a food or meal (no photo):",
                 style = MaterialTheme.typography.bodyMedium
             )
             OutlinedTextField(
                 value = moreFoodName,
                 onValueChange = { moreFoodName = it },
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("Food name") }
+                label = { Text("Food or meal name") }
             )
-            OutlinedTextField(
-                value = moreFoodQty,
-                onValueChange = { moreFoodQty = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Qty") }
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Text-only submit
+            Button(
+                onClick = {
+                    val safeName = moreFoodName.trim()
+                    if (safeName.isNotEmpty()) {
+                        onAddFood(safeName, 1, null, null)
+                        moreFoodName = ""
+                    }
+                },
+                enabled = moreFoodName.isNotBlank()
+            ) {
+                Text("Submit food/meal for analysis (no photo)")
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = "Option 2: Use photos for analysis:",
+                style = MaterialTheme.typography.bodyMedium
             )
             Spacer(modifier = Modifier.height(4.dp))
 
@@ -408,39 +447,60 @@ fun HomeScreen(
                     fontWeight = FontWeight.SemiBold
                 )
                 items.forEach { item ->
-                    val rating = item.rating
-                    val ratingColor = when {
-                        rating == null -> MaterialTheme.colorScheme.onSurfaceVariant
-                        rating <= 3 -> Color(0xFFB00020) // red
-                        rating <= 6 -> Color(0xFFFFC107) // yellow/amber
-                        rating <= 9 -> Color(0xFF4CAF50) // green
+                    val healthRating = item.rating
+                    val dietFitRating = item.dietFitRating
+                    val healthColor = when {
+                        healthRating == null -> MaterialTheme.colorScheme.onSurfaceVariant
+                        healthRating <= 3 -> Color(0xFFB00020) // red
+                        healthRating <= 6 -> Color(0xFFFFC107) // yellow/amber
+                        healthRating <= 9 -> Color(0xFF4CAF50) // green
+                        else -> Color(0xFF1B5E20)       // dark green
+                    }
+                    val dietColor = when {
+                        dietFitRating == null -> MaterialTheme.colorScheme.onSurfaceVariant
+                        dietFitRating <= 3 -> Color(0xFFB00020) // red
+                        dietFitRating <= 6 -> Color(0xFFFFC107) // yellow/amber
+                        dietFitRating <= 9 -> Color(0xFF4CAF50) // green
                         else -> Color(0xFF1B5E20)       // dark green
                     }
 
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(vertical = 2.dp)
                     ) {
-                        Text(
-                            text = item.name,
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        Text(
-                            text = "x${item.quantity}",
-                            modifier = Modifier.padding(end = 8.dp),
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Text(
-                            text = rating?.let { "${it}/10" } ?: "-/10",
-                            modifier = Modifier.padding(end = 8.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = ratingColor
-                        )
-                        OutlinedButton(onClick = { onRemoveFood(item.id) }) {
-                            Text("X")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = item.name,
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = "x${item.quantity}",
+                                modifier = Modifier.padding(end = 8.dp),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Column(
+                                horizontalAlignment = Alignment.End
+                            ) {
+                                Text(
+                                    text = "Health Rating ${healthRating?.let { "$it/10" } ?: "-/10"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = healthColor
+                                )
+                                if (dietFitRating != null && state.profile?.dietType != DietType.NO_DIET) {
+                                    Text(
+                                        text = "Diet Rating ${dietFitRating}/10",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = dietColor
+                                    )
+                                }
+                            }
+                            OutlinedButton(onClick = { onRemoveFood(item.id) }) {
+                                Text("X")
+                            }
                         }
                     }
                 }
@@ -518,5 +578,3 @@ private fun createImageUri(context: Context): Uri {
     val authority = "${context.packageName}.fileprovider"
     return FileProvider.getUriForFile(context, authority, file)
 }
-
-

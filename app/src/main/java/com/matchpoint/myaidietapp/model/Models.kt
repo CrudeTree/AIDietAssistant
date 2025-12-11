@@ -52,7 +52,15 @@ data class FoodItem(
     val photoUrl: String? = null,
     val labelUrl: String? = null,
     val notes: String? = null,
-    val rating: Int? = null
+    /**
+     * General health rating (1-10) regardless of diet.
+     */
+    val rating: Int? = null,
+    /**
+     * How well this food fits the current diet (1-10),
+     * e.g. fig bars might be 7/10 for health but 1/10 for carnivore.
+     */
+    val dietFitRating: Int? = null
 )
 
 data class UserProfile(
@@ -67,7 +75,12 @@ data class UserProfile(
     val mealHistory: List<MealHistoryEntry> = emptyList(),
     val wearableData: WearableData? = null,
     val nextCheckInAtMillis: Long? = null,
-    val nextMealAtMillis: Long? = null
+    val nextMealAtMillis: Long? = null,
+    /**
+     * When true, the AI/app is allowed to drive meal timing and recommendations
+     * instead of just passively logging data.
+     */
+    val autoPilotEnabled: Boolean = false
 )
 
 data class MealWindow(
@@ -104,8 +117,3 @@ data class MessageLog(
     val userId: String = "",
     val log: List<MessageEntry> = emptyList()
 )
-
-
-
-
-

@@ -30,12 +30,16 @@ data class CheckInRequest(
 
 data class CheckInResponse(val text: String)
 
+/**
+ * Parsed shape of the JSON inside the `text` field when mode="analyze_food".
+ */
 data class AnalyzeFoodResponse(
     val accepted: Boolean,
-    val rating: Int,
+    val rating: Int,               // general health rating 1-10
     val normalizedName: String,
-    val summary: String,
-    val concerns: String
+    val summary: String,           // short combined health + diet-fit summary
+    val concerns: String,
+    val dietFitRating: Int? = null // how well it fits the current diet, 1-10
 )
 
 interface CheckInService {
@@ -80,8 +84,7 @@ class OpenAiProxyRepository(
         labelUrl: String?,
         dietType: DietType
     ): AnalyzeFoodResponse = withContext(Dispatchers.IO) {
-        // Reuse the /checkin endpoint with mode=\"analyze_food\".
-        // The Cloud Function returns { text: \"{...json...}\" } for this mode.
+        // Reuse the /checkin endpoint with mode="analyze_food".
         val response = service.checkIn(
             CheckInRequest(
                 lastMeal = null,
@@ -99,6 +102,29 @@ class OpenAiProxyRepository(
         analyzeAdapter.fromJson(raw)
             ?: throw IllegalStateException("Empty food analysis response")
     }
+
+    /**
+     * Text-only variant: ask the proxy to analyze a food by name without images.
+     */
+    suspend fun analyzeFoodByName(
+        foodName: String,
+        dietType: DietType
+    ): AnalyzeFoodResponse = withContext(Dispatchers.IO) {
+        val response = service.checkIn(
+            CheckInRequest(
+                lastMeal = foodName,
+                hungerSummary = null,
+                weightTrend = null,
+                minutesSinceMeal = null,
+                mode = "analyze_food",
+                inventorySummary = null,
+                productUrl = null,
+                labelUrl = null,
+                dietType = dietType.name
+            )
+        )
+        val raw = response.text
+        analyzeAdapter.fromJson(raw)
+            ?: throw IllegalStateException("Empty food analysis response (text)")
+    }
 }
-
-
