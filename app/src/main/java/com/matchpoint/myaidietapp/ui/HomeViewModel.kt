@@ -18,6 +18,7 @@ import com.matchpoint.myaidietapp.model.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import retrofit2.HttpException
 import kotlin.random.Random
 import java.time.Instant
@@ -125,6 +126,70 @@ class HomeViewModel(
 
     fun signOut() {
         authRepo.signOut()
+    }
+
+    fun deleteAccount(password: String) {
+        if (password.isBlank()) {
+            _uiState.value = _uiState.value.copy(error = "Please enter your password to delete your account.")
+            return
+        }
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, error = null)
+            try {
+                // 1) Delete app data (best-effort)
+                deleteUserDataBestEffort()
+                // 2) Delete Firebase Auth user (requires recent login)
+                authRepo.reauthenticateAndDeleteCurrentUser(password)
+                // After this, authUid becomes null and UI returns to AuthScreen
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    isProcessing = false,
+                    error = e.message ?: "Failed to delete account."
+                )
+            }
+        }
+    }
+
+    private suspend fun deleteUserDataBestEffort() {
+        // Firestore documents/collections we use:
+        // - users/{uid} (UserProfile)
+        // - users/{uid}/schedules/*
+        // - users/{uid}/meta/messageLog
+        // - users/{uid}/meta/usageDaily/days/*
+        try {
+            // Delete schedules
+            val schedules = db.collection("users").document(userId).collection("schedules").get().await()
+            schedules.documents.forEach { it.reference.delete().await() }
+        } catch (_: Exception) {
+        }
+
+        try {
+            // Delete message log doc
+            db.collection("users").document(userId).collection("meta").document("messageLog").delete().await()
+        } catch (_: Exception) {
+        }
+
+        try {
+            // Delete quota docs (server-side daily usage)
+            val days = db.collection("users").document(userId)
+                .collection("meta").document("usageDaily")
+                .collection("days").get().await()
+            days.documents.forEach { it.reference.delete().await() }
+            db.collection("users").document(userId).collection("meta").document("usageDaily").delete().await()
+        } catch (_: Exception) {
+        }
+
+        try {
+            // Delete user profile doc last
+            db.collection("users").document(userId).delete().await()
+        } catch (_: Exception) {
+        }
+
+        try {
+            // Delete Storage content (best-effort)
+            storageRepo.deleteAllUserContent(userId)
+        } catch (_: Exception) {
+        }
     }
 
     private fun checkAndConsumeChatQuotaOrPrompt(profile: UserProfile): Boolean {

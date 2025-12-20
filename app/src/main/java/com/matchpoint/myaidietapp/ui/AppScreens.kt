@@ -324,7 +324,10 @@ fun DigitalStomachApp() {
                 onOpenChoosePlan = {
                     pendingPlanNotice = null
                     navigate(Screen.CHOOSE_PLAN)
-                }
+                },
+                isProcessing = state.isProcessing,
+                errorText = state.error,
+                onDeleteAccount = { password -> vm.deleteAccount(password) }
             )
             screen == Screen.PAYMENT -> PaymentScreen(
                 selectedTier = pendingUpgradeTier,

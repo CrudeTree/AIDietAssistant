@@ -36,6 +36,14 @@ We keep your data while your account is active so the app can function. You can 
 - You can choose not to upload photos and use text-only entry.
 - You can delete food items you added (where supported by the UI).
 
+## How to delete your account
+In the app:
+- Open **Profile**
+- Tap **Delete account**
+- Enter your password to confirm
+
+This will permanently delete your account and associated data.
+
 ## Children’s privacy
 This app is not intended for children.
 

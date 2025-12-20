@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -23,6 +24,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.runtime.Composable
@@ -53,7 +55,10 @@ fun ProfileScreen(
     onUpdateFastingPreset: (FastingPreset) -> Unit,
     onUpdateEatingWindowStart: (Int) -> Unit,
     onSignOut: () -> Unit,
-    onOpenChoosePlan: () -> Unit
+    onOpenChoosePlan: () -> Unit,
+    isProcessing: Boolean,
+    errorText: String?,
+    onDeleteAccount: (String) -> Unit
 ) {
     val tier = profile.subscriptionTier
     val tierLabel = when (tier) {
@@ -63,6 +68,44 @@ fun ProfileScreen(
     }
 
     Surface {
+        var deleteDialog by remember { mutableStateOf(false) }
+        var deletePassword by remember { mutableStateOf("") }
+
+        if (deleteDialog) {
+            AlertDialog(
+                onDismissRequest = { if (!isProcessing) deleteDialog = false },
+                title = { Text("Delete account") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "This will permanently delete your account and your saved data (foods, photos, chat history).",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        OutlinedTextField(
+                            value = deletePassword,
+                            onValueChange = { deletePassword = it },
+                            label = { Text("Confirm password") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = { onDeleteAccount(deletePassword) },
+                        enabled = !isProcessing && deletePassword.isNotBlank(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB00020))
+                    ) { Text("Delete") }
+                },
+                dismissButton = {
+                    OutlinedButton(
+                        onClick = { deleteDialog = false },
+                        enabled = !isProcessing
+                    ) { Text("Cancel") }
+                }
+            )
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -76,6 +119,14 @@ fun ProfileScreen(
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold
             )
+
+            if (errorText != null) {
+                Text(
+                    text = errorText,
+                    color = Color(0xFFB00020),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
 
             Text(
                 text = "Name: ${profile.name}",
@@ -403,8 +454,22 @@ fun ProfileScreen(
             // No explicit Back button: system back returns to AI Food Coach.
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            Button(
+                onClick = {
+                    deletePassword = ""
+                    deleteDialog = true
+                },
+                enabled = !isProcessing,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB00020))
+            ) {
+                Text("Delete account")
+            }
+
             OutlinedButton(
                 onClick = onSignOut,
+                enabled = !isProcessing,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("Sign out")
