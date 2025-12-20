@@ -7,14 +7,12 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
-import com.google.firebase.FirebaseApp
 import com.matchpoint.myaidietapp.ui.DigitalStomachApp
 import com.matchpoint.myaidietapp.ui.theme.MyAIDietAppTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        FirebaseApp.initializeApp(this)
         enableEdgeToEdge()
         setContent {
             MyAIDietAppTheme {

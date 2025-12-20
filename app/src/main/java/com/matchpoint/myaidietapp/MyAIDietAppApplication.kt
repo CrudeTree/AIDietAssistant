@@ -1,0 +1,14 @@
+package com.matchpoint.myaidietapp
+
+import android.app.Application
+import com.google.firebase.FirebaseApp
+
+class MyAIDietAppApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        FirebaseApp.initializeApp(this)
+        AppCheckInstaller.install()
+    }
+}
+
+

@@ -6,3 +6,10 @@ package com.matchpoint.myaidietapp.logic
  * so this class is an empty shell kept for compatibility.
  */
 class CheckInGenerator
+
+
+
+
+
+
+

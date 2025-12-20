@@ -19,6 +19,25 @@ enum class HungerLevel(val score: Int) {
     STARVING(1)
 }
 
+enum class FastingPreset(
+    val label: String,
+    val eatingWindowHours: Int? // null means "no fasting / no fixed window"
+) {
+    NONE("No fasting window", null),
+    FAST_12_12("12:12 (12h eating window)", 12),
+    FAST_14_10("14:10 (10h eating window)", 10),
+    FAST_16_8("16:8 (8h eating window)", 8),
+    FAST_18_6("18:6 (6h eating window)", 6),
+    FAST_20_4("20:4 (4h eating window)", 4),
+    OMAD("OMAD (1h eating window)", 1)
+}
+
+enum class SubscriptionTier {
+    FREE,
+    REGULAR,
+    PRO
+}
+
 data class WeightEntry(
     val date: String = "",
     val weight: Double = 0.0
@@ -34,7 +53,24 @@ data class MealHistoryEntry(
     val mealName: String = "",
     val items: List<String> = emptyList(),
     val portionSizeOz: Int = 0,
-    val satietyFeedback: HungerLevel? = null
+    val satietyFeedback: HungerLevel? = null,
+    /**
+     * Optional logging fields used by the "AI Food Coach" to infer satiety timing.
+     */
+    val mealPhotoUrl: String? = null,
+    val totalGrams: Int? = null,
+    val estimatedCalories: Int? = null,
+    val estimatedProteinG: Int? = null,
+    val estimatedCarbsG: Int? = null,
+    val estimatedFatG: Int? = null,
+    val aiNotes: String? = null,
+    /**
+     * Optional ratings for the logged meal itself (useful for UI + future planning).
+     */
+    val healthRating: Int? = null,
+    val dietFitRating: Int? = null,
+    val dietRatings: Map<String, Int> = emptyMap(),
+    val allergyRatings: Map<String, Int> = emptyMap()
 )
 
 data class WearableData(
@@ -49,9 +85,27 @@ data class FoodItem(
     val id: String = "",
     val name: String = "",
     val quantity: Int = 1,
+    /**
+     * Categories for how the AI should treat this item.
+     * Allowed values: "MEAL", "INGREDIENT", "SNACK"
+     * (Multiple allowed: e.g. banana can be INGREDIENT + SNACK.)
+     */
+    val categories: List<String> = emptyList(),
     val photoUrl: String? = null,
     val labelUrl: String? = null,
+    val nutritionFactsUrl: String? = null,
     val notes: String? = null,
+    /**
+     * Optional nutrition + ingredient estimates.
+     * - For text-only: these are best guesses.
+     * - For photo-based: these should come from label/nutrition facts when readable,
+     *   otherwise a best guess.
+     */
+    val estimatedCalories: Int? = null,
+    val estimatedProteinG: Int? = null,
+    val estimatedCarbsG: Int? = null,
+    val estimatedFatG: Int? = null,
+    val ingredientsText: String? = null,
     /**
      * General health rating (1-10) regardless of diet.
      */
@@ -60,13 +114,34 @@ data class FoodItem(
      * How well this food fits the current diet (1-10),
      * e.g. fig bars might be 7/10 for health but 1/10 for carnivore.
      */
-    val dietFitRating: Int? = null
+    val dietFitRating: Int? = null,
+    /**
+     * Ratings for many diets so switching diets doesn't create "missing" ratings.
+     * Keys are DietType.name (e.g. "CARNIVORE", "KETO", "VEGAN", ...).
+     */
+    val dietRatings: Map<String, Int> = emptyMap(),
+    /**
+     * Optional allergy "safety/fit" ratings (1-10) so we can warn users.
+     * Keys are strings like "PEANUT", "TREE_NUT", "DAIRY", "EGG", "SOY",
+     * "SHELLFISH", "FISH", "SESAME", "GLUTEN", etc.
+     */
+    val allergyRatings: Map<String, Int> = emptyMap()
 )
 
 data class UserProfile(
     val name: String = "",
     val weightGoal: Double? = null,
     val dietType: DietType = DietType.CARNIVORE,
+    // Pricing tier (local MVP; later should be driven by Play Billing + server checks)
+    val subscriptionTier: SubscriptionTier = SubscriptionTier.FREE,
+    val fastingPreset: FastingPreset = FastingPreset.NONE,
+    /**
+     * Local-time eating window start/end (minutes from midnight).
+     * Used when fastingPreset != NONE.
+     * Defaults to 12:00–20:00 for common 16:8-ish behavior, but user can change later.
+     */
+    val eatingWindowStartMinutes: Int? = null,
+    val eatingWindowEndMinutes: Int? = null,
     val allowedFoods: List<String> = emptyList(),
     val inventory: Map<String, Int> = emptyMap(),
     val foodItems: List<FoodItem> = emptyList(),

@@ -11,7 +11,6 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.work.Worker
 import androidx.work.WorkerParameters
 import com.matchpoint.myaidietapp.MainActivity
-import com.matchpoint.myaidietapp.R
 
 /**
  * Simple WorkManager worker that shows a local notification reminding the user
@@ -52,8 +51,8 @@ class MealNotificationWorker(
         )
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(context.getString(R.string.app_name))
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("AI Food Coach")
             .setContentText(message)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setContentIntent(pendingIntent)
@@ -67,7 +66,7 @@ class MealNotificationWorker(
 
     private fun createNotificationChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val name = context.getString(R.string.app_name)
+            val name = "AI Food Coach"
             val descriptionText = "Meal reminders"
             val importance = NotificationManager.IMPORTANCE_DEFAULT
             val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
@@ -85,3 +84,10 @@ class MealNotificationWorker(
         private const val NOTIFICATION_ID = 1001
     }
 }
+
+
+
+
+
+
+

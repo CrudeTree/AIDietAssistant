@@ -46,8 +46,44 @@ class UserRepository(
         saveUserProfile(updated)
     }
 
+    suspend fun updateFoodItemCategories(foodId: String, categories: List<String>) {
+        val profile = getUserProfile() ?: return
+        val updated = profile.copy(
+            foodItems = profile.foodItems.map { item ->
+                if (item.id == foodId) item.copy(categories = categories) else item
+            }
+        )
+        saveUserProfile(updated)
+    }
+
     suspend fun updateDietType(dietType: com.matchpoint.myaidietapp.model.DietType) {
         userDoc.update("dietType", dietType).await()
+    }
+
+    suspend fun updateFastingPreset(
+        preset: com.matchpoint.myaidietapp.model.FastingPreset,
+        startMinutes: Int?,
+        endMinutes: Int?
+    ) {
+        userDoc.update(
+            mapOf(
+                "fastingPreset" to preset,
+                "eatingWindowStartMinutes" to startMinutes,
+                "eatingWindowEndMinutes" to endMinutes
+            )
+        ).await()
+    }
+
+    suspend fun updateWeightGoal(weightGoal: Double?) {
+        userDoc.update("weightGoal", weightGoal).await()
+    }
+
+    suspend fun appendWeightEntry(entry: com.matchpoint.myaidietapp.model.WeightEntry) {
+        val profile = getUserProfile() ?: return
+        val updated = profile.copy(
+            weightHistory = profile.weightHistory + entry
+        )
+        saveUserProfile(updated)
     }
 
     suspend fun appendHungerSignal(level: HungerLevel) {
@@ -111,3 +147,10 @@ class MessagesRepository(
         messagesDoc.set(updated).await()
     }
 }
+
+
+
+
+
+
+

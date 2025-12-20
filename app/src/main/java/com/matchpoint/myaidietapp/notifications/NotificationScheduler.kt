@@ -2,7 +2,9 @@ package com.matchpoint.myaidietapp.notifications
 
 import android.content.Context
 import androidx.work.Data
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.matchpoint.myaidietapp.model.ScheduledMealDay
 import java.util.concurrent.TimeUnit
@@ -28,6 +30,25 @@ class NotificationScheduler(
 
             workManager.enqueue(request)
         }
+    }
+
+    fun ensureAutoPilotLoop() {
+        val request = PeriodicWorkRequestBuilder<AutoPilotLoopWorker>(15, TimeUnit.MINUTES)
+            .build()
+
+        workManager.enqueueUniquePeriodicWork(
+            UNIQUE_AUTOPILOT_LOOP,
+            ExistingPeriodicWorkPolicy.UPDATE,
+            request
+        )
+    }
+
+    fun cancelAutoPilotLoop() {
+        workManager.cancelUniqueWork(UNIQUE_AUTOPILOT_LOOP)
+    }
+
+    private companion object {
+        const val UNIQUE_AUTOPILOT_LOOP = "digital_stomach_autopilot_loop"
     }
 }
 
