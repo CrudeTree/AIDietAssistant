@@ -15,8 +15,8 @@ android {
         applicationId = "com.myaidiet.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 6
+        versionName = "1.0.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -72,7 +72,6 @@ dependencies {
     // Firebase (Firestore + Analytics + Messaging via BoM)
     implementation(platform("com.google.firebase:firebase-bom:33.2.0"))
     implementation("com.google.firebase:firebase-firestore-ktx")
-    implementation("com.google.firebase:firebase-analytics-ktx")
     implementation("com.google.firebase:firebase-messaging-ktx")
     implementation("com.google.firebase:firebase-storage-ktx")
     implementation("com.google.firebase:firebase-auth-ktx")
@@ -94,6 +93,9 @@ dependencies {
 
     // Image loading for local photo previews in Compose (FoodPhotoCaptureScreen)
     implementation("io.coil-kt:coil-compose:2.7.0")
+
+    // Google Play Billing (subscriptions)
+    implementation("com.android.billingclient:billing-ktx:6.2.1")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

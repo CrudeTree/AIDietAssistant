@@ -7,6 +7,9 @@
 /.idea/workspace.xml
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
+.idea/deploymentTargetSelector.xml
+.idea/deviceManager.xml
+.kotlin/
 .DS_Store
 /build
 /captures
@@ -16,6 +19,10 @@ local.properties
 
 # Module build dirs
 /app/build
+
+# Release artifacts / generated bundles
+*.aab
+*.apk
 
 # Firebase config (keep private)
 **/google-services.json

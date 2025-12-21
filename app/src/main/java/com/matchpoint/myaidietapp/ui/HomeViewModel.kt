@@ -116,6 +116,19 @@ class HomeViewModel(
         }
     }
 
+    fun updateSubscriptionTier(tier: SubscriptionTier) {
+        viewModelScope.launch {
+            try {
+                val current = userRepo.getUserProfile() ?: return@launch
+                val updated = current.copy(subscriptionTier = tier)
+                userRepo.saveUserProfile(updated)
+                _uiState.value = _uiState.value.copy(profile = updated)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message ?: "Failed to update plan.")
+            }
+        }
+    }
+
     fun dismissUpgradePrompt() {
         // kept for backward compatibility with older UI; no-op now
     }

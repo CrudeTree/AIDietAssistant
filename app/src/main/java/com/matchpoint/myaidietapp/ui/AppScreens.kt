@@ -332,7 +332,13 @@ fun DigitalStomachApp() {
             screen == Screen.PAYMENT -> PaymentScreen(
                 selectedTier = pendingUpgradeTier,
                 billingCycle = pendingUpgradeCycle,
-                onBack = { popOrHome() }
+                onBack = { popOrHome() },
+                onEntitlementGranted = { tier ->
+                    // Source of truth is Firestore user profile; this also drives server-side quota enforcement.
+                    realVm.updateSubscriptionTier(tier)
+                    pendingPlanNotice = null
+                    goHomeClear()
+                }
             )
             screen == Screen.CHOOSE_PLAN && state.profile != null -> ChoosePlanScreen(
                 currentTier = state.profile!!.subscriptionTier,
