@@ -8,7 +8,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -29,10 +31,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.matchpoint.myaidietapp.model.DietType
 import com.matchpoint.myaidietapp.model.FoodItem
+import androidx.compose.ui.res.painterResource
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -40,6 +45,9 @@ fun FoodListScreen(
     dietType: DietType,
     items: List<FoodItem>,
     filterCategory: String? = null,
+    totalLimit: Int,
+    showFoodIcons: Boolean = true,
+    fontSizeSp: Float = 18f,
     onRemoveFood: (String) -> Unit,
     onUpdateCategories: (foodId: String, categories: Set<String>) -> Unit,
     onAddText: (category: String) -> Unit,
@@ -93,7 +101,16 @@ fun FoodListScreen(
                 else -> "Foods known"
             }
             Text(
-                text = "$title • Diet: ${if (dietType == DietType.NO_DIET) "No Diet" else dietType.name}",
+                text = run {
+                    val used = items.size
+                    val remaining = (totalLimit - used).coerceAtLeast(0)
+                    val dietLabel = if (dietType == DietType.NO_DIET) "No Diet" else dietType.name
+                    if (filterCategory.isNullOrBlank()) {
+                        "Items: $used / $totalLimit • Diet: $dietLabel"
+                    } else {
+                        "$title • $remaining/$totalLimit available • Diet: $dietLabel"
+                    }
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -121,6 +138,12 @@ fun FoodListScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(filtered) { item ->
+                    val context = LocalContext.current
+                    val iconResId = remember(item.name) {
+                        FoodIconResolver.resolveFoodIconResId(context, item.name)
+                    }
+                    val fs = fontSizeSp.coerceIn(12f, 40f)
+                    val iconDp = (fs * 2.0f).coerceIn(24f, 64f).dp
                     val healthRating = item.rating
                     val dietFitRating = item.dietRatings[dietType.name] ?: item.dietFitRating
 
@@ -159,10 +182,19 @@ fun FoodListScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            if (showFoodIcons && iconResId != null) {
+                                Image(
+                                    painter = painterResource(id = iconResId),
+                                    contentDescription = item.name,
+                                    modifier = Modifier
+                                        .size(iconDp)
+                                        .padding(end = 10.dp)
+                                )
+                            }
                             Text(
                                 text = item.name,
                                 modifier = Modifier.weight(1f),
-                                style = MaterialTheme.typography.bodyMedium
+                                style = MaterialTheme.typography.bodyMedium.copy(fontSize = fs.sp)
                             )
                             Text(
                                 text = "x${item.quantity}",

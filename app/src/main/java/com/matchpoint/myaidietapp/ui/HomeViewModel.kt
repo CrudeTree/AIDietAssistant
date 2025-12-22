@@ -4,7 +4,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import android.util.Log
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException
+import com.google.firebase.auth.FirebaseAuthRecentLoginRequiredException
 import com.matchpoint.myaidietapp.data.MessagesRepository
+import com.matchpoint.myaidietapp.data.RecipesRepository
 import com.matchpoint.myaidietapp.data.ScheduledMealsRepository
 import com.matchpoint.myaidietapp.data.StorageRepository
 import com.matchpoint.myaidietapp.data.AuthRepository
@@ -13,6 +16,7 @@ import com.matchpoint.myaidietapp.data.OpenAiProxyRepository
 import com.matchpoint.myaidietapp.data.CheckInRequest
 import com.matchpoint.myaidietapp.logic.CheckInGenerator
 import com.matchpoint.myaidietapp.logic.DailyPlanner
+import com.matchpoint.myaidietapp.logic.RecipeParser
 import com.matchpoint.myaidietapp.notifications.NotificationScheduler
 import com.matchpoint.myaidietapp.model.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +35,7 @@ data class UiState(
     val profile: UserProfile? = null,
     val todaySchedule: ScheduledMealDay? = null,
     val messages: List<MessageEntry> = emptyList(),
+    val savedRecipes: List<SavedRecipe> = emptyList(),
     val introPending: Boolean = false,
     val error: String? = null,
     val isProcessing: Boolean = false,
@@ -53,6 +58,25 @@ private fun FoodItem.effectiveCategories(): Set<String> {
     return if (set.isEmpty()) setOf("SNACK") else set
 }
 
+private fun HttpException.safeErrorBodySnippet(maxChars: Int = 220): String? {
+    return try {
+        val raw = response()?.errorBody()?.string()
+        val normalized = raw
+            ?.trim()
+            ?.replace(Regex("\\s+"), " ")
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        if (normalized.length <= maxChars) normalized else normalized.take(maxChars) + "…"
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun describeProxyHttpError(e: HttpException): String {
+    val body = e.safeErrorBodySnippet()
+    return if (body.isNullOrBlank()) "proxy HTTP ${e.code()}" else "proxy HTTP ${e.code()} $body"
+}
+
 class HomeViewModel(
     private val userId: String,
     private val db: FirebaseFirestore = FirebaseFirestore.getInstance(),
@@ -70,6 +94,7 @@ class HomeViewModel(
     private val userRepo by lazy { UserRepository(db, userId) }
     private val scheduleRepo by lazy { ScheduledMealsRepository(db, userId) }
     private val messagesRepo by lazy { MessagesRepository(db, userId) }
+    private val recipesRepo by lazy { RecipesRepository(db, userId) }
     private val storageRepo by lazy { StorageRepository() }
     private val proxyRepo by lazy { OpenAiProxyRepository() }
     private val authRepo by lazy { AuthRepository() }
@@ -103,12 +128,14 @@ class HomeViewModel(
                 notificationScheduler?.scheduleForDay(schedule)
             }
             val messages = messagesRepo.getMessageLog().log
+            val savedRecipes = runCatching { recipesRepo.listRecipesNewestFirst() }.getOrElse { emptyList() }
 
             _uiState.value = UiState(
                 isLoading = false,
                 profile = profile,
                 todaySchedule = schedule,
-                messages = messages
+                messages = messages,
+                savedRecipes = savedRecipes
             )
 
         } catch (e: Exception) {
@@ -149,15 +176,26 @@ class HomeViewModel(
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isProcessing = true, error = null)
             try {
-                // 1) Delete app data (best-effort)
+                // IMPORTANT: Re-auth FIRST. If password is wrong, do NOT delete user data.
+                authRepo.reauthenticateCurrentUser(password)
+
+                // Delete app data (best-effort). This requires the user still being signed in.
                 deleteUserDataBestEffort()
-                // 2) Delete Firebase Auth user (requires recent login)
-                authRepo.reauthenticateAndDeleteCurrentUser(password)
+
+                // Finally, delete Firebase Auth user (requires recent login).
+                authRepo.deleteCurrentUser()
                 // After this, authUid becomes null and UI returns to AuthScreen
             } catch (e: Exception) {
+                val msg = when (e) {
+                    is FirebaseAuthInvalidCredentialsException ->
+                        "Incorrect password. Please try again."
+                    is FirebaseAuthRecentLoginRequiredException ->
+                        "For security, please sign out and sign back in, then try deleting your account again."
+                    else -> e.message ?: "Failed to delete account."
+                }
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
-                    error = e.message ?: "Failed to delete account."
+                    error = msg
                 )
             }
         }
@@ -173,13 +211,15 @@ class HomeViewModel(
             // Delete schedules
             val schedules = db.collection("users").document(userId).collection("schedules").get().await()
             schedules.documents.forEach { it.reference.delete().await() }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("DigitalStomach", "Delete account: failed deleting schedules", e)
         }
 
         try {
             // Delete message log doc
             db.collection("users").document(userId).collection("meta").document("messageLog").delete().await()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("DigitalStomach", "Delete account: failed deleting messageLog", e)
         }
 
         try {
@@ -189,19 +229,22 @@ class HomeViewModel(
                 .collection("days").get().await()
             days.documents.forEach { it.reference.delete().await() }
             db.collection("users").document(userId).collection("meta").document("usageDaily").delete().await()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("DigitalStomach", "Delete account: failed deleting usageDaily", e)
         }
 
         try {
             // Delete user profile doc last
             db.collection("users").document(userId).delete().await()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("DigitalStomach", "Delete account: failed deleting user profile doc", e)
         }
 
         try {
             // Delete Storage content (best-effort)
             storageRepo.deleteAllUserContent(userId)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("DigitalStomach", "Delete account: failed deleting storage content", e)
         }
     }
 
@@ -424,7 +467,7 @@ class HomeViewModel(
                 } else {
                     val e = analysisAttempt.exceptionOrNull()
                     val detail = when (e) {
-                        is retrofit2.HttpException -> "proxy HTTP ${e.code()}"
+                        is retrofit2.HttpException -> describeProxyHttpError(e)
                         else -> e?.javaClass?.simpleName
                     }
                     val aiEntry = MessageEntry(
@@ -443,6 +486,136 @@ class HomeViewModel(
                 }
             } catch (e: Exception) {
                 Log.e("DigitalStomach", "addFoodItemSimple failed", e)
+                _uiState.value = _uiState.value.copy(error = e.message)
+            } finally {
+                _uiState.value = _uiState.value.copy(isProcessing = false)
+            }
+        }
+    }
+
+    fun addFoodItemsBatch(
+        names: List<String>,
+        categories: Set<String>
+    ) {
+        viewModelScope.launch {
+            try {
+                _uiState.value = _uiState.value.copy(isProcessing = true, error = null)
+                val current = userRepo.getUserProfile() ?: return@launch
+                val diet = current.dietType
+
+                val cleaned = names.map { it.trim() }.filter { it.isNotBlank() }
+                if (cleaned.isEmpty()) return@launch
+
+                val existingLower = current.foodItems.map { it.name.trim().lowercase() }.toSet()
+                val deduped = cleaned
+                    .map { it.replace(Regex("\\s+"), " ").trim() }
+                    .distinctBy { it.lowercase() }
+                    .filter { it.lowercase() !in existingLower }
+
+                if (deduped.isEmpty()) {
+                    messagesRepo.appendMessage(
+                        MessageEntry(
+                            id = UUID.randomUUID().toString(),
+                            sender = MessageSender.AI,
+                            text = "Those items are already in your list."
+                        )
+                    )
+                    _uiState.value = _uiState.value.copy(messages = messagesRepo.getMessageLog().log)
+                    return@launch
+                }
+
+                if (!checkFoodListLimitOrPrompt(current, addingCount = deduped.size)) {
+                    return@launch
+                }
+
+                // Backend has a batch max; chunk requests to stay under it.
+                val CHUNK_SIZE = 25
+                val analyses = mutableListOf<com.matchpoint.myaidietapp.data.AnalyzeFoodResponse>()
+                val chunks = deduped.chunked(CHUNK_SIZE)
+
+                for (chunk in chunks) {
+                    val batch = runCatching {
+                        proxyRepo.analyzeFoodsByNameBatch(chunk, diet)
+                    }.getOrNull()
+
+                    if (batch != null && batch.size == chunk.size) {
+                        analyses.addAll(batch)
+                    } else {
+                        // Fallback (still after one Submit): analyze one-by-one for this chunk.
+                        chunk.forEach { n ->
+                            val a = runCatching { proxyRepo.analyzeFoodByName(n, diet) }.getOrNull()
+                            if (a != null) analyses.add(a)
+                        }
+                    }
+                }
+
+                val newItems = mutableListOf<FoodItem>()
+                val cats = categories.map { it.uppercase() }.distinct()
+                val existingAfterLower = current.foodItems.map { it.name.trim().lowercase() }.toMutableSet()
+
+                analyses.forEach { analysis ->
+                    if (!analysis.accepted) return@forEach
+                    val normalized = analysis.normalizedName.ifBlank { "" }.trim()
+                    val nameToUse = if (normalized.isNotBlank()) normalized else null
+                    val finalName = nameToUse ?: return@forEach
+                    val key = finalName.lowercase()
+                    if (existingAfterLower.contains(key)) return@forEach
+                    existingAfterLower.add(key)
+
+                    val dietFitRating = analysis.dietFitRating ?: analysis.rating
+                    val dietRatings = analysis.dietRatings.toMutableMap().apply {
+                        putIfAbsent(diet.name, dietFitRating)
+                    }.toMap()
+
+                    newItems.add(
+                        FoodItem(
+                            id = UUID.randomUUID().toString(),
+                            name = finalName,
+                            quantity = 1,
+                            categories = cats,
+                            notes = analysis.summary,
+                            estimatedCalories = analysis.estimatedCalories,
+                            estimatedProteinG = analysis.estimatedProteinG,
+                            estimatedCarbsG = analysis.estimatedCarbsG,
+                            estimatedFatG = analysis.estimatedFatG,
+                            ingredientsText = analysis.ingredientsText,
+                            rating = analysis.rating,
+                            dietFitRating = dietFitRating,
+                            dietRatings = dietRatings,
+                            allergyRatings = analysis.allergyRatings
+                        )
+                    )
+                }
+
+                if (newItems.isEmpty()) {
+                    messagesRepo.appendMessage(
+                        MessageEntry(
+                            id = UUID.randomUUID().toString(),
+                            sender = MessageSender.AI,
+                            text = "I couldn’t recognize any of those as food items."
+                        )
+                    )
+                    _uiState.value = _uiState.value.copy(messages = messagesRepo.getMessageLog().log)
+                    return@launch
+                }
+
+                val updated = current.copy(foodItems = current.foodItems + newItems)
+                userRepo.saveUserProfile(updated)
+
+                messagesRepo.appendMessage(
+                    MessageEntry(
+                        id = UUID.randomUUID().toString(),
+                        sender = MessageSender.AI,
+                        text = "Added ${newItems.size} item(s) to your list."
+                    )
+                )
+
+                _uiState.value = _uiState.value.copy(
+                    profile = updated,
+                    messages = messagesRepo.getMessageLog().log
+                )
+            } catch (e: Exception) {
+                Log.e("DigitalStomach", "addFoodItemsBatch failed", e)
                 _uiState.value = _uiState.value.copy(error = e.message)
             } finally {
                 _uiState.value = _uiState.value.copy(isProcessing = false)
@@ -512,6 +685,30 @@ class HomeViewModel(
                         backfillFoodRatingsIfNeeded(updatedProfile)
                     }
                 }
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message)
+            }
+        }
+    }
+
+    fun updateShowFoodIcons(show: Boolean) {
+        viewModelScope.launch {
+            try {
+                userRepo.updateShowFoodIcons(show)
+                val updated = userRepo.getUserProfile()
+                _uiState.value = _uiState.value.copy(profile = updated)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message)
+            }
+        }
+    }
+
+    fun updateUiFontSizeSp(fontSizeSp: Float) {
+        viewModelScope.launch {
+            try {
+                userRepo.updateUiFontSizeSp(fontSizeSp)
+                val updated = userRepo.getUserProfile()
+                _uiState.value = _uiState.value.copy(profile = updated)
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(error = e.message)
             }
@@ -717,7 +914,10 @@ class HomeViewModel(
                         _uiState.value = _uiState.value.copy(planGateNotice = "You have reached your daily limit.")
                     }
                 }.getOrElse { e ->
-                    "No service: ${e.message ?: "unknown error"}"
+                    when (e) {
+                        is HttpException -> "No service: ${describeProxyHttpError(e)}"
+                        else -> "No service: ${e.message ?: "unknown error"}"
+                    }
                 }
 
                 val aiEntry = MessageEntry(
@@ -777,13 +977,17 @@ class HomeViewModel(
                         _uiState.value = _uiState.value.copy(planGateNotice = "You have reached your daily limit.")
                     }
                 }.getOrElse { e ->
-                    "No service. Check internet connectivity. (${e.javaClass.simpleName})"
+                    when (e) {
+                        is HttpException -> "No service: ${describeProxyHttpError(e)}"
+                        else -> "No service. Check internet connectivity. (${e.javaClass.simpleName})"
+                    }
                 }
 
                 val aiEntry = MessageEntry(
                     id = UUID.randomUUID().toString(),
                     sender = MessageSender.AI,
-                    text = replyText
+                    text = replyText,
+                    kind = "RECIPE"
                 )
                 messagesRepo.appendMessage(aiEntry)
 
@@ -793,6 +997,47 @@ class HomeViewModel(
                 _uiState.value = _uiState.value.copy(error = e.message)
             } finally {
                 _uiState.value = _uiState.value.copy(isProcessing = false)
+            }
+        }
+    }
+
+    fun saveRecipeFromMessage(messageId: String) {
+        viewModelScope.launch {
+            try {
+                val msg = _uiState.value.messages.firstOrNull { it.id == messageId }
+                    ?: run { _uiState.value = _uiState.value.copy(error = "Recipe message not found."); return@launch }
+
+                if (msg.sender != MessageSender.AI || msg.kind != "RECIPE") {
+                    _uiState.value = _uiState.value.copy(error = "That message isn't a recipe.")
+                    return@launch
+                }
+
+                // Idempotent: recipe doc ID == message ID
+                if (_uiState.value.savedRecipes.any { it.id == msg.id }) return@launch
+
+                val parsed = RecipeParser.parse(msg.text)
+                val recipe = SavedRecipe(
+                    id = msg.id,
+                    title = parsed.title.ifBlank { "Recipe" },
+                    text = msg.text,
+                    ingredients = parsed.ingredients
+                )
+                recipesRepo.saveRecipe(recipe)
+
+                val updated = recipesRepo.listRecipesNewestFirst()
+                _uiState.value = _uiState.value.copy(savedRecipes = updated)
+
+                // Optional confirmation message in chat (kept short)
+                messagesRepo.appendMessage(
+                    MessageEntry(
+                        id = UUID.randomUUID().toString(),
+                        sender = MessageSender.AI,
+                        text = "Saved to Profile → Recipes."
+                    )
+                )
+                _uiState.value = _uiState.value.copy(messages = messagesRepo.getMessageLog().log)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message ?: "Failed to save recipe.")
             }
         }
     }
@@ -1191,7 +1436,10 @@ class HomeViewModel(
         }.onFailure { e ->
             Log.e("DigitalStomach", "Auto check-in failed", e)
         }.getOrElse { e ->
-            "No service: ${e.message ?: "unknown error"}"
+            when (e) {
+                is HttpException -> "No service: ${describeProxyHttpError(e)}"
+                else -> "No service: ${e.message ?: "unknown error"}"
+            }
         }
 
         val aiEntry = MessageEntry(

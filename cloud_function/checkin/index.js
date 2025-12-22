@@ -26,6 +26,16 @@ function extractJsonObject(text) {
   return JSON.parse(jsonString);
 }
 
+function extractJsonArray(text) {
+  let jsonString = (text || '').trim();
+  const start = jsonString.indexOf('[');
+  const end = jsonString.lastIndexOf(']');
+  if (start !== -1 && end !== -1 && end > start) {
+    jsonString = jsonString.slice(start, end + 1);
+  }
+  return JSON.parse(jsonString);
+}
+
 function asNullableInt(x) {
   if (x === null || x === undefined) return null;
   const n = Number(x);
@@ -102,7 +112,10 @@ functions.http('checkin', async (req, res) => {
       // Meal logging
       mealPhotoUrl,
       mealGrams,
-      mealText
+      mealText,
+
+      // Batch text analysis
+      foodNames
     } = req.body || {};
 
     // ---------- 0) AUTH (required) ----------
@@ -368,6 +381,114 @@ No extra keys. No markdown. No text outside JSON.
           estimatedFatG: null,
           ingredientsText: ''
         };
+      }
+
+      return res.json({ text: JSON.stringify(parsed) });
+    }
+
+    // ---------- 1a) BATCH FOOD NAME ANALYSIS MODE (text only) ----------
+    if (mode === 'analyze_food_batch') {
+      const names = Array.isArray(foodNames) ? foodNames.map((x) => String(x || '').trim()).filter(Boolean) : [];
+      if (names.length === 0) {
+        return res.status(400).json({ text: 'NO_FOOD_NAMES' });
+      }
+      // Safety cap to keep token usage bounded. Client can chunk requests.
+      const MAX_BATCH = Number(process.env.ANALYZE_FOOD_BATCH_MAX || 25);
+      if (names.length > MAX_BATCH) {
+        return res.status(400).json({ text: 'TOO_MANY_FOOD_NAMES' });
+      }
+
+      const instructions = `
+You are a nutrition coach.
+
+Input: a list of food/meal/ingredient names (text only). Diet context: ${dietType || "unknown"}.
+
+For EACH input name, return an object with EXACT keys:
+{
+  "accepted": boolean,
+  "rating": number,
+  "dietFitRating": number,
+  "dietRatings": { "NO_DIET": number, "CARNIVORE": number, "KETO": number, "VEGAN": number, "VEGETARIAN": number, "PALEO": number, "OMNIVORE": number, "OTHER": number },
+  "allergyRatings": { "PEANUT": number, "TREE_NUT": number, "DAIRY": number, "EGG": number, "SOY": number, "WHEAT_GLUTEN": number, "SESAME": number, "FISH": number, "SHELLFISH": number },
+  "normalizedName": string,
+  "summary": string,
+  "concerns": string,
+  "estimatedCalories": number|null,
+  "estimatedProteinG": number|null,
+  "estimatedCarbsG": number|null,
+  "estimatedFatG": number|null,
+  "ingredientsText": string
+}
+
+Rules:
+- Keep the ORDER exactly the same as the input list.
+- accepted=true for anything that is plausibly edible food/drink/meal/ingredient.
+- accepted=false only if clearly not food.
+- dietFitRating MUST equal dietRatings[${(dietType || '').toUpperCase() || 'NO_DIET'}] when that key exists; otherwise set dietFitRating=rating.
+- Output ONE JSON ARRAY ONLY. No markdown. No extra text.
+      `.trim();
+
+      const fullPrompt = [
+        `Food names (in order):`,
+        ...names.map((n, i) => `${i + 1}) ${n}`),
+        '',
+        instructions
+      ].join('\n');
+
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: pickModel({ isVision: false }),
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a precise nutrition coach. Always respond with strict JSON when asked.'
+            },
+            { role: 'user', content: fullPrompt }
+          ],
+          temperature: 0.2
+        })
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text();
+        console.error('OpenAI analyze_food_batch error', resp.status, text);
+        return res.status(502).json({ text: 'Service unavailable.' });
+      }
+
+      const data = await resp.json();
+      const contentText = data.choices?.[0]?.message?.content?.trim() || '';
+
+      let parsed;
+      try {
+        parsed = extractJsonArray(contentText);
+        if (!Array.isArray(parsed)) throw new Error('Expected array');
+
+        // Normalize nutrition ints + ensure ingredientsText string
+        parsed = parsed.map((x) => {
+          const o = x || {};
+          o.estimatedCalories = (o.estimatedCalories === null || o.estimatedCalories === undefined)
+            ? null
+            : asNullableInt(o.estimatedCalories);
+          o.estimatedProteinG = (o.estimatedProteinG === null || o.estimatedProteinG === undefined)
+            ? null
+            : asNullableInt(o.estimatedProteinG);
+          o.estimatedCarbsG = (o.estimatedCarbsG === null || o.estimatedCarbsG === undefined)
+            ? null
+            : asNullableInt(o.estimatedCarbsG);
+          o.estimatedFatG = (o.estimatedFatG === null || o.estimatedFatG === undefined)
+            ? null
+            : asNullableInt(o.estimatedFatG);
+          if (typeof o.ingredientsText !== 'string') o.ingredientsText = '';
+          return o;
+        });
+      } catch (e) {
+        console.error('Failed to parse analyze_food_batch JSON', e, contentText);
+        return res.status(502).json({ text: 'Invalid JSON from model' });
       }
 
       return res.json({ text: JSON.stringify(parsed) });

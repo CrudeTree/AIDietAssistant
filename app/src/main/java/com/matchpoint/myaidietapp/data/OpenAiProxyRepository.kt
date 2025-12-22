@@ -5,6 +5,7 @@ import com.matchpoint.myaidietapp.model.DietType
 import com.google.firebase.auth.FirebaseAuth
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import com.squareup.moshi.Types
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -18,6 +19,7 @@ import retrofit2.http.Headers
 import retrofit2.http.POST
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.tasks.await
+import android.util.Log
 
 data class CheckInRequest(
     val lastMeal: String?,
@@ -41,7 +43,9 @@ data class CheckInRequest(
     // Meal logging support (mode="analyze_meal")
     val mealPhotoUrl: String? = null,
     val mealGrams: Int? = null,
-    val mealText: String? = null
+    val mealText: String? = null,
+    // Batch food name analysis (mode="analyze_food_batch")
+    val foodNames: List<String>? = null
 )
 
 data class CheckInResponse(val text: String)
@@ -107,6 +111,9 @@ class OpenAiProxyRepository(
 
     private val analyzeAdapter = moshi.adapter(AnalyzeFoodResponse::class.java)
     private val analyzeMealAdapter = moshi.adapter(AnalyzeMealResponse::class.java)
+    private val analyzeListAdapter = moshi.adapter<List<AnalyzeFoodResponse>>(
+        Types.newParameterizedType(List::class.java, AnalyzeFoodResponse::class.java)
+    )
 
     private val service: CheckInService by lazy {
         val logging = HttpLoggingInterceptor().apply {
@@ -115,13 +122,21 @@ class OpenAiProxyRepository(
         val authInterceptor = Interceptor { chain ->
             val req = chain.request()
             val token = runBlocking {
-                FirebaseAuth.getInstance().currentUser?.getIdToken(false)?.await()?.token
+                val user = FirebaseAuth.getInstance().currentUser ?: return@runBlocking null
+                // Token can be null briefly right after sign-in, or if it needs refresh.
+                // Try cached first, then force refresh once.
+                val t1 = runCatching { user.getIdToken(false).await().token }.getOrNull()
+                if (!t1.isNullOrBlank()) return@runBlocking t1
+                runCatching { user.getIdToken(true).await().token }.getOrNull()
             }
             val authed = if (!token.isNullOrBlank()) {
                 req.newBuilder()
                     .header("Authorization", "Bearer $token")
                     .build()
             } else {
+                // Keep the request as-is, but emit a debug log so 401s are diagnosable.
+                // If this fires, the backend will respond with {"text":"AUTH_REQUIRED"}.
+                Log.w("OpenAiProxyRepository", "No Firebase ID token available; sending request without Authorization header")
                 req
             }
             chain.proceed(authed)
@@ -199,6 +214,34 @@ class OpenAiProxyRepository(
         val raw = response.text
         analyzeAdapter.fromJson(raw)
             ?: throw IllegalStateException("Empty food analysis response (text)")
+    }
+
+    /**
+     * Batch text-only variant: analyze multiple food names in one request.
+     * The backend enforces a max batch size; callers should chunk as needed.
+     */
+    suspend fun analyzeFoodsByNameBatch(
+        foodNames: List<String>,
+        dietType: DietType
+    ): List<AnalyzeFoodResponse> = withContext(Dispatchers.IO) {
+        val cleaned = foodNames.map { it.trim() }.filter { it.isNotBlank() }
+        if (cleaned.isEmpty()) return@withContext emptyList()
+
+        val response = service.checkIn(
+            CheckInRequest(
+                lastMeal = null,
+                hungerSummary = null,
+                weightTrend = null,
+                minutesSinceMeal = null,
+                mode = "analyze_food_batch",
+                inventorySummary = null,
+                dietType = dietType.name,
+                foodNames = cleaned
+            )
+        )
+        val raw = response.text
+        analyzeListAdapter.fromJson(raw)
+            ?: throw IllegalStateException("Empty batch food analysis response")
     }
 
     suspend fun analyzeMeal(

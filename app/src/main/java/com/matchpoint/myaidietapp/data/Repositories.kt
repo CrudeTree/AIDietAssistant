@@ -60,6 +60,14 @@ class UserRepository(
         userDoc.update("dietType", dietType).await()
     }
 
+    suspend fun updateShowFoodIcons(show: Boolean) {
+        userDoc.update("showFoodIcons", show).await()
+    }
+
+    suspend fun updateUiFontSizeSp(fontSizeSp: Float) {
+        userDoc.update("uiFontSizeSp", fontSizeSp).await()
+    }
+
     suspend fun updateFastingPreset(
         preset: com.matchpoint.myaidietapp.model.FastingPreset,
         startMinutes: Int?,

@@ -70,10 +70,12 @@ import android.net.Uri
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalTime
+import androidx.compose.ui.unit.sp
 
 private enum class Screen {
     HOME,
     PROFILE,
+    SETTINGS,
     FOOD_LIST,
     ADD_ENTRY,
     TEXT_FOOD_ENTRY,
@@ -81,7 +83,8 @@ private enum class Screen {
     MEAL_LOG,
     GROCERY_SCAN,
     PAYMENT,
-    CHOOSE_PLAN
+    CHOOSE_PLAN,
+    RECIPE_DETAIL
 }
 
 enum class BillingCycle {
@@ -122,6 +125,7 @@ fun DigitalStomachApp() {
     var pendingUpgradeTier by remember { mutableStateOf<com.matchpoint.myaidietapp.model.SubscriptionTier?>(null) }
     var pendingUpgradeCycle by remember { mutableStateOf(BillingCycle.MONTHLY) }
     var pendingPlanNotice by remember { mutableStateOf<String?>(null) }
+    var openRecipeId by remember { mutableStateOf<String?>(null) }
     // Photo-based food capture no longer uses a quantity (always 1).
 
     fun navigate(to: Screen) {
@@ -193,6 +197,11 @@ fun DigitalStomachApp() {
         // Safe: vm exists if authUid != null
         val realVm = vm!!
         val state by realVm.uiState.collectAsState()
+        fun foodLimitFor(tier: com.matchpoint.myaidietapp.model.SubscriptionTier): Int = when (tier) {
+            com.matchpoint.myaidietapp.model.SubscriptionTier.FREE -> 20
+            com.matchpoint.myaidietapp.model.SubscriptionTier.REGULAR -> 100
+            com.matchpoint.myaidietapp.model.SubscriptionTier.PRO -> 500
+        }
 
         // If a quota/limit is hit, send user to Choose Plan screen with a notice banner.
         val gate = state.planGateNotice
@@ -247,8 +256,10 @@ fun DigitalStomachApp() {
                     TextEntryMode.SNACK -> setOf("SNACK")
                 },
                 isProcessing = state.isProcessing,
-                onSubmit = { name, categories ->
-                    vm.addFoodItemSimple(name, categories, 1, null, null, null)
+                remainingSlots = (foodLimitFor(state.profile!!.subscriptionTier) - state.profile!!.foodItems.size).coerceAtLeast(0),
+                limit = foodLimitFor(state.profile!!.subscriptionTier),
+                onSubmit = { names, categories ->
+                    vm.addFoodItemsBatch(names, categories)
                     goHomeClear()
                 },
                 onBack = { popOrHome() }
@@ -285,6 +296,9 @@ fun DigitalStomachApp() {
                 dietType = state.profile!!.dietType,
                 items = state.profile!!.foodItems,
                 filterCategory = foodListFilter,
+                totalLimit = foodLimitFor(state.profile!!.subscriptionTier),
+                showFoodIcons = state.profile!!.showFoodIcons,
+                fontSizeSp = state.profile!!.uiFontSizeSp,
                 onRemoveFood = { vm.removeFoodItem(it) },
                 onUpdateCategories = { id, cats -> vm.updateFoodItemCategories(id, cats) },
                 onAddText = { category ->
@@ -308,8 +322,8 @@ fun DigitalStomachApp() {
             )
             screen == Screen.PROFILE && state.profile != null -> ProfileScreen(
                 profile = state.profile!!,
+                savedRecipes = state.savedRecipes,
                 onBack = { popOrHome() },
-                onDietChange = { vm.updateDiet(it) },
                 onRemoveFood = { vm.removeFoodItem(it) },
                 onAutoPilotChange = { vm.setAutoPilotEnabled(it) },
                 onUpdateWeightGoal = { vm.updateWeightGoal(it) },
@@ -318,8 +332,6 @@ fun DigitalStomachApp() {
                     foodListFilter = filter
                     navigate(Screen.FOOD_LIST)
                 },
-                onUpdateFastingPreset = { vm.updateFastingPreset(it) },
-                onUpdateEatingWindowStart = { vm.updateEatingWindowStart(it) },
                 onSignOut = { vm.signOut() },
                 onOpenChoosePlan = {
                     pendingPlanNotice = null
@@ -327,8 +339,38 @@ fun DigitalStomachApp() {
                 },
                 isProcessing = state.isProcessing,
                 errorText = state.error,
+                onOpenRecipe = { recipe ->
+                    openRecipeId = recipe.id
+                    navigate(Screen.RECIPE_DETAIL)
+                },
+                onOpenSettings = { navigate(Screen.SETTINGS) }
+            )
+            screen == Screen.SETTINGS && state.profile != null -> SettingsScreen(
+                profile = state.profile!!,
+                isProcessing = state.isProcessing,
+                errorText = state.error,
+                onBack = { popOrHome() },
+                onToggleShowFoodIcons = { show -> vm.updateShowFoodIcons(show) },
+                onSetFontSizeSp = { sp -> vm.updateUiFontSizeSp(sp) },
+                onDietChange = { vm.updateDiet(it) },
+                onUpdateFastingPreset = { vm.updateFastingPreset(it) },
+                onUpdateEatingWindowStart = { vm.updateEatingWindowStart(it) },
                 onDeleteAccount = { password -> vm.deleteAccount(password) }
             )
+            screen == Screen.RECIPE_DETAIL && state.profile != null -> run {
+                val recipe = openRecipeId?.let { id -> state.savedRecipes.firstOrNull { it.id == id } }
+                if (recipe == null) {
+                    // If missing (deleted/never loaded), just go back.
+                    popOrHome()
+                    Unit
+                } else {
+                    RecipeDetailScreen(
+                        recipe = recipe,
+                        profile = state.profile!!,
+                        onBack = { popOrHome() }
+                    )
+                }
+            }
             screen == Screen.PAYMENT -> PaymentScreen(
                 selectedTier = pendingUpgradeTier,
                 billingCycle = pendingUpgradeCycle,
@@ -363,6 +405,7 @@ fun DigitalStomachApp() {
                 onOpenAddEntry = { navigate(Screen.ADD_ENTRY) },
                 onOpenGroceryScan = { navigate(Screen.GROCERY_SCAN) },
                 onGenerateMeal = { vm.generateMeal() },
+                onSaveRecipe = { messageId -> vm.saveRecipeFromMessage(messageId) },
                 onConfirmGroceryAdd = { vm.confirmAddPendingGrocery() },
                 onDiscardGrocery = { vm.discardPendingGrocery() }
             )
@@ -635,12 +678,14 @@ fun HomeScreen(
     onOpenAddEntry: () -> Unit,
     onOpenGroceryScan: () -> Unit,
     onGenerateMeal: () -> Unit,
+    onSaveRecipe: (messageId: String) -> Unit,
     onConfirmGroceryAdd: () -> Unit,
     onDiscardGrocery: () -> Unit
 ) {
     var chatInput by remember { mutableStateOf("") }
     val nowMillis = System.currentTimeMillis()
     val mealDue = state.profile?.nextMealAtMillis?.let { nowMillis >= it } == true
+    val fontSp = state.profile?.uiFontSizeSp?.coerceIn(12f, 40f) ?: 18f
 
     Column(
         modifier = Modifier
@@ -741,30 +786,59 @@ fun HomeScreen(
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("AI Food Coach Thinking…")
+                        AiThinkingIndicator()
                     }
                 }
             }
             items(state.messages.reversed()) { msg ->
                 val isAi = msg.sender == MessageSender.AI
-                Row(
+                val isRecipe = isAi && msg.kind == "RECIPE"
+                val isSaved = isRecipe && state.savedRecipes.any { it.id == msg.id }
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = if (isAi) Arrangement.Start else Arrangement.End
+                    horizontalAlignment = if (isAi) Alignment.Start else Alignment.End
                 ) {
-                    Text(
-                        text = msg.text,
-                        modifier = Modifier
-                            .background(
-                                if (isAi) MaterialTheme.colorScheme.surfaceVariant
-                                else MaterialTheme.colorScheme.primaryContainer
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = if (isAi) Arrangement.Start else Arrangement.End
+                    ) {
+                        val annotated = MarkdownLite.toAnnotatedString(msg.text)
+                        Text(
+                            text = annotated,
+                            modifier = Modifier
+                                .background(
+                                    if (isAi) MaterialTheme.colorScheme.surfaceVariant
+                                    else MaterialTheme.colorScheme.primaryContainer
+                                )
+                                .padding(10.dp),
+                            color = if (isAi) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.onPrimaryContainer,
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontSize = fontSp.sp,
+                                lineHeight = (fontSp * 1.25f).sp
                             )
-                            .padding(10.dp),
-                        color = if (isAi) MaterialTheme.colorScheme.onSurfaceVariant
-                        else MaterialTheme.colorScheme.onPrimaryContainer,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                        )
+                    }
+
+                    if (isRecipe) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = if (isAi) Arrangement.Start else Arrangement.End
+                        ) {
+                            if (isSaved) {
+                                Text(
+                                    text = "Saved",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            } else {
+                                OutlinedButton(onClick = { onSaveRecipe(msg.id) }) {
+                                    Text("Save recipe")
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

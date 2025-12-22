@@ -134,6 +134,15 @@ data class UserProfile(
     val dietType: DietType = DietType.CARNIVORE,
     // Pricing tier (local MVP; later should be driven by Play Billing + server checks)
     val subscriptionTier: SubscriptionTier = SubscriptionTier.FREE,
+    /**
+     * UI preference: show cute food/ingredient icons (ic_food_*) in lists and recipes.
+     */
+    val showFoodIcons: Boolean = true,
+    /**
+     * UI preference: base font size (sp) for long-form content like recipes and chat.
+     * Kept in a safe range in UI (e.g. 12..40) to avoid breaking layouts.
+     */
+    val uiFontSizeSp: Float = 18f,
     val fastingPreset: FastingPreset = FastingPreset.NONE,
     /**
      * Local-time eating window start/end (minutes from midnight).
@@ -185,10 +194,28 @@ data class MessageEntry(
     val id: String = "",
     val timestamp: Timestamp = Timestamp.now(),
     val sender: MessageSender = MessageSender.AI,
-    val text: String = ""
+    val text: String = "",
+    /**
+     * Optional message type hint for richer UI behaviors.
+     * Examples: "RECIPE"
+     */
+    val kind: String? = null
 )
 
 data class MessageLog(
     val userId: String = "",
     val log: List<MessageEntry> = emptyList()
+)
+
+/**
+ * Saved AI recipe stored under users/{uid}/recipes/{id}.
+ *
+ * `id` is typically the source MessageEntry.id to make saves idempotent.
+ */
+data class SavedRecipe(
+    val id: String = "",
+    val createdAt: Timestamp = Timestamp.now(),
+    val title: String = "",
+    val text: String = "",
+    val ingredients: List<String> = emptyList()
 )

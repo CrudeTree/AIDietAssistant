@@ -25,18 +25,34 @@ class AuthRepository(
     }
 
     /**
+     * Re-authenticate the current user (Email/Password).
+     * Firebase requires a recent login for sensitive operations like account deletion.
+     */
+    suspend fun reauthenticateCurrentUser(password: String) {
+        val user = auth.currentUser ?: error("Not signed in")
+        val email = user.email ?: error("No email associated with this account")
+        val cred = EmailAuthProvider.getCredential(email, password)
+        user.reauthenticate(cred).await()
+    }
+
+    /**
+     * Delete the current Firebase Auth user (must already be recently re-authenticated).
+     */
+    suspend fun deleteCurrentUser() {
+        val user = auth.currentUser ?: error("Not signed in")
+        user.delete().await()
+        auth.signOut()
+    }
+
+    /**
      * Re-authenticates the currently signed-in user using their password (Email/Password auth),
      * then deletes the Firebase Auth user.
      *
      * Note: Firebase requires recent login to delete an account.
      */
     suspend fun reauthenticateAndDeleteCurrentUser(password: String) {
-        val user = auth.currentUser ?: error("Not signed in")
-        val email = user.email ?: error("No email associated with this account")
-        val cred = EmailAuthProvider.getCredential(email, password)
-        user.reauthenticate(cred).await()
-        user.delete().await()
-        auth.signOut()
+        reauthenticateCurrentUser(password)
+        deleteCurrentUser()
     }
 }
 
