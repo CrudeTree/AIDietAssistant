@@ -1,20 +1,25 @@
 package com.matchpoint.myaidietapp.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -25,9 +30,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.painterResource
+import com.matchpoint.myaidietapp.R
 import com.matchpoint.myaidietapp.model.SubscriptionTier
 
 @Composable
@@ -35,7 +44,8 @@ fun ChoosePlanScreen(
     currentTier: SubscriptionTier,
     notice: String?,
     onClose: () -> Unit,
-    onPickPlan: (SubscriptionTier, BillingCycle) -> Unit
+    onPickPlan: (SubscriptionTier, BillingCycle) -> Unit,
+    onManageSubscription: () -> Unit
 ) {
     var cycle by remember { mutableStateOf(BillingCycle.MONTHLY) }
     var selectedTier by remember { mutableStateOf(currentTier) }
@@ -45,10 +55,11 @@ fun ChoosePlanScreen(
         SubscriptionTier.REGULAR -> 1
         SubscriptionTier.PRO -> 2
     }
-    val canUpgrade = tierRank(selectedTier) > tierRank(currentTier)
+    val isUpgrade = tierRank(selectedTier) > tierRank(currentTier)
+    val canProceed = selectedTier != currentTier
 
-    val regularPrice = if (cycle == BillingCycle.YEARLY) "$99.99/year" else "$9.99/month"
-    val proPrice = if (cycle == BillingCycle.YEARLY) "$199.99/year" else "$19.99/month"
+    val basicPrice = if (cycle == BillingCycle.YEARLY) "$99.99/year" else "$9.99/month"
+    val premiumPrice = if (cycle == BillingCycle.YEARLY) "$199.99/year" else "$19.99/month"
 
     Surface {
         Column(
@@ -101,26 +112,29 @@ fun ChoosePlanScreen(
                 subtitle = "Good for trying it out",
                 bullets = listOf("5 chats/day", "20 food items"),
                 selected = selectedTier == SubscriptionTier.FREE,
-                enabled = tierRank(SubscriptionTier.FREE) > tierRank(currentTier),
+                enabled = true,
                 isCurrent = currentTier == SubscriptionTier.FREE,
+                badgeResId = null,
                 onClick = { selectedTier = SubscriptionTier.FREE }
             )
             PlanCard(
-                title = "Regular — $regularPrice",
-                subtitle = "Best value for most people",
+                title = "Basic — $basicPrice",
+                subtitle = "Great for consistent progress",
                 bullets = listOf("50 chats/day", "100 food items"),
                 selected = selectedTier == SubscriptionTier.REGULAR,
-                enabled = tierRank(SubscriptionTier.REGULAR) > tierRank(currentTier),
+                enabled = true,
                 isCurrent = currentTier == SubscriptionTier.REGULAR,
+                badgeResId = R.drawable.ic_basic_badge,
                 onClick = { selectedTier = SubscriptionTier.REGULAR }
             )
             PlanCard(
-                title = "Pro — $proPrice",
+                title = "Premium — $premiumPrice",
                 subtitle = "For power users",
                 bullets = listOf("150 chats/day", "500 food items"),
                 selected = selectedTier == SubscriptionTier.PRO,
-                enabled = tierRank(SubscriptionTier.PRO) > tierRank(currentTier),
+                enabled = true,
                 isCurrent = currentTier == SubscriptionTier.PRO,
+                badgeResId = R.drawable.ic_premium_badge,
                 onClick = { selectedTier = SubscriptionTier.PRO }
             )
 
@@ -129,19 +143,25 @@ fun ChoosePlanScreen(
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 TextButton(onClick = onClose) { Text("Not now") }
                 Button(
-                    onClick = { onPickPlan(selectedTier, cycle) },
-                    enabled = canUpgrade
+                    onClick = {
+                        if (isUpgrade) onPickPlan(selectedTier, cycle) else onManageSubscription()
+                    },
+                    enabled = canProceed
                 ) {
-                    Text("Upgrade")
+                    Text(if (isUpgrade) "Upgrade" else "Manage in Google Play")
+                }
+            }
+
+            if (currentTier != SubscriptionTier.FREE) {
+                OutlinedButton(
+                    onClick = onManageSubscription,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Manage / cancel subscription (Google Play)")
                 }
             }
 
             Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Current plan: ${currentTier.name.lowercase().replaceFirstChar { it.uppercase() }}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
         }
     }
 }
@@ -154,6 +174,7 @@ private fun PlanCard(
     selected: Boolean,
     enabled: Boolean,
     isCurrent: Boolean,
+    badgeResId: Int?,
     onClick: () -> Unit
 ) {
     val shape = RoundedCornerShape(16.dp)
@@ -171,23 +192,37 @@ private fun PlanCard(
         border = BorderStroke(1.dp, borderColor),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(title, fontWeight = FontWeight.Bold)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            bullets.forEach { b -> Text("• $b", style = MaterialTheme.typography.bodySmall) }
-            if (isCurrent) {
-                Text(
-                    "Current plan",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.SemiBold
-                )
-            } else if (selected) {
-                Text(
-                    "Selected",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.SemiBold
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                val titleText = if (isCurrent) "$title (Current plan)" else title
+                Text(titleText, fontWeight = FontWeight.Bold)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                bullets.forEach { b -> Text("• $b", style = MaterialTheme.typography.bodySmall) }
+                if (!isCurrent && selected) {
+                    Text(
+                        "Selected",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
+            if (badgeResId != null) {
+                Image(
+                    painter = painterResource(badgeResId),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        // "Sticker" feel: slightly off-card + rotated.
+                        .offset(x = 10.dp, y = (-10).dp)
+                        .size(64.dp)
+                        .rotate(30f)
                 )
             }
         }

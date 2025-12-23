@@ -15,11 +15,16 @@ android {
         applicationId = "com.myaidiet.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 6
-        versionName = "1.0.2"
+        versionCode = 12
+        versionName = "1.0.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
+
+    // RevenueCat public SDK key. Set it in ~/.gradle/gradle.properties:
+    // REVENUECAT_API_KEY=public_... (recommended)
+    val revenueCatApiKey: String =
+        (project.findProperty("REVENUECAT_API_KEY") as String?)?.trim().orEmpty()
 
     buildTypes {
         release {
@@ -33,6 +38,7 @@ android {
                 "CHECKIN_PROXY_BASE_URL",
                 "\"https://us-central1-myaidiet.cloudfunctions.net/\""
             )
+            buildConfigField("String", "REVENUECAT_API_KEY", "\"$revenueCatApiKey\"")
         }
         debug {
             buildConfigField(
@@ -40,6 +46,7 @@ android {
                 "CHECKIN_PROXY_BASE_URL",
                 "\"https://us-central1-myaidiet.cloudfunctions.net/\""
             )
+            buildConfigField("String", "REVENUECAT_API_KEY", "\"$revenueCatApiKey\"")
         }
     }
     compileOptions {
@@ -94,8 +101,8 @@ dependencies {
     // Image loading for local photo previews in Compose (FoodPhotoCaptureScreen)
     implementation("io.coil-kt:coil-compose:2.7.0")
 
-    // Google Play Billing (subscriptions)
-    implementation("com.android.billingclient:billing-ktx:6.2.1")
+    // RevenueCat (subscriptions + receipt validation + restores)
+    implementation("com.revenuecat.purchases:purchases:9.1.0")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

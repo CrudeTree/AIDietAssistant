@@ -18,18 +18,17 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.matchpoint.myaidietapp.billing.BillingProducts
-import com.matchpoint.myaidietapp.billing.BillingEvent
-import com.matchpoint.myaidietapp.billing.PlayBillingRepository
+import com.matchpoint.myaidietapp.billing.RevenueCatEvent
+import com.matchpoint.myaidietapp.billing.RevenueCatPackages
+import com.matchpoint.myaidietapp.billing.RevenueCatRepository
 import com.matchpoint.myaidietapp.model.SubscriptionTier
-import kotlinx.coroutines.launch
 
 @Composable
 fun PaymentScreen(
@@ -39,56 +38,59 @@ fun PaymentScreen(
     onEntitlementGranted: (SubscriptionTier) -> Unit
 ) {
     val tierLabel = when (selectedTier) {
-        SubscriptionTier.REGULAR -> if (billingCycle == com.matchpoint.myaidietapp.ui.BillingCycle.YEARLY) "Regular — $99.99/year" else "Regular — $9.99/month"
-        SubscriptionTier.PRO -> if (billingCycle == com.matchpoint.myaidietapp.ui.BillingCycle.YEARLY) "Pro — $199.99/year" else "Pro — $19.99/month"
+        // We keep the internal enum names (REGULAR/PRO) for backward compatibility,
+        // but present them as Basic/Premium to users.
+        SubscriptionTier.REGULAR -> if (billingCycle == com.matchpoint.myaidietapp.ui.BillingCycle.YEARLY) "Basic — $99.99/year" else "Basic — $9.99/month"
+        SubscriptionTier.PRO -> if (billingCycle == com.matchpoint.myaidietapp.ui.BillingCycle.YEARLY) "Premium — $199.99/year" else "Premium — $19.99/month"
         SubscriptionTier.FREE, null -> "Free"
     }
 
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val billing = remember { PlayBillingRepository(context.applicationContext, scope) }
-    val isReady by billing.isReady.collectAsState()
-    val detailsMap by billing.productDetails.collectAsState()
+    val rc = remember { RevenueCatRepository() }
+    val offerings by rc.offerings.collectAsState()
+    val customerInfo by rc.customerInfo.collectAsState()
 
-    val productId = remember(selectedTier, billingCycle) {
-        selectedTier?.let { BillingProducts.productIdFor(it, billingCycle) }
-    }
-    val productDetails = productId?.let { detailsMap[it] }
-
-    fun priceLabel(): String? {
-        val pd = productDetails ?: return null
-        val phase = pd.subscriptionOfferDetails
-            ?.firstOrNull()
-            ?.pricingPhases
-            ?.pricingPhaseList
-            ?.firstOrNull()
-        return phase?.formattedPrice
-    }
-
-    LaunchedEffect(productId) {
-        billing.connect()
-        if (!productId.isNullOrBlank()) {
-            billing.queryProducts(listOf(productId))
+    val desiredPackageId = remember(selectedTier, billingCycle) {
+        when (selectedTier) {
+            SubscriptionTier.REGULAR ->
+                if (billingCycle == BillingCycle.YEARLY) RevenueCatPackages.BASIC_ANNUAL else RevenueCatPackages.BASIC_MONTHLY
+            SubscriptionTier.PRO ->
+                if (billingCycle == BillingCycle.YEARLY) RevenueCatPackages.PREMIUM_ANNUAL else RevenueCatPackages.PREMIUM_MONTHLY
+            else -> null
         }
+    }
+    val desiredPackage = offerings?.current
+        ?.availablePackages
+        ?.firstOrNull { it.identifier == desiredPackageId }
+
+    LaunchedEffect(Unit) {
+        rc.refresh()
     }
 
     var errorText by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(billing) {
-        billing.events.collect { e ->
+    var autoLaunched by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(rc) {
+        rc.events.collect { e ->
             when (e) {
-                is BillingEvent.PurchaseCompleted -> {
-                    val tier = BillingProducts.tierForProductId(e.productId)
-                    if (tier != null) {
-                        onEntitlementGranted(tier)
-                    } else {
-                        errorText = "Purchase completed, but plan mapping is unknown (${e.productId})."
-                    }
+                is RevenueCatEvent.TierUpdated -> {
+                    if (e.tier != SubscriptionTier.FREE) onEntitlementGranted(e.tier)
                 }
-                is BillingEvent.Error -> {
+                is RevenueCatEvent.Error -> {
                     errorText = e.message
                 }
             }
         }
+    }
+
+    // Auto-launch the Google Play purchase sheet as soon as we have a package.
+    LaunchedEffect(desiredPackageId, desiredPackage) {
+        if (autoLaunched) return@LaunchedEffect
+        if (selectedTier == null || selectedTier == SubscriptionTier.FREE) return@LaunchedEffect
+        val act = context as? Activity ?: return@LaunchedEffect
+        val pkg = desiredPackage ?: return@LaunchedEffect
+        autoLaunched = true
+        errorText = null
+        rc.purchase(act, pkg)
     }
 
     Surface {
@@ -107,10 +109,11 @@ fun PaymentScreen(
                 text = "Selected plan: $tierLabel",
                 style = MaterialTheme.typography.bodyMedium
             )
-            val playPrice = priceLabel()
-            if (!playPrice.isNullOrBlank()) {
+            val currentTier = customerInfo?.let { rc.tierFrom(it) } ?: SubscriptionTier.FREE
+            if (currentTier != SubscriptionTier.FREE) {
+                val label = if (currentTier == SubscriptionTier.REGULAR) "Basic" else "Premium"
                 Text(
-                    text = "Google Play price: $playPrice",
+                    text = "Current subscription: $label",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -128,25 +131,31 @@ fun PaymentScreen(
             Button(
                 onClick = {
                     val act = (context as? Activity)
-                    val pd = productDetails
+                    val pkg = desiredPackage
                     if (act == null) {
                         errorText = "Unable to start billing: no Activity."
                         return@Button
                     }
-                    if (pd == null) {
-                        errorText = "Loading plan details… try again in a moment."
+                    if (pkg == null) {
+                        errorText = "Loading paywall… make sure RevenueCat offering/packages are configured."
                         return@Button
                     }
                     errorText = null
-                    billing.launchSubscriptionPurchase(act, pd)
+                    rc.purchase(act, pkg)
                 },
                 enabled = selectedTier != null &&
                     selectedTier != SubscriptionTier.FREE &&
-                    isReady &&
-                    productDetails != null,
+                    desiredPackage != null,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("Subscribe with Google Play")
+                Text(if (autoLaunched) "Subscribe (again)" else "Subscribe")
+            }
+
+            OutlinedButton(
+                onClick = { rc.restore() },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Restore purchases")
             }
 
             OutlinedButton(

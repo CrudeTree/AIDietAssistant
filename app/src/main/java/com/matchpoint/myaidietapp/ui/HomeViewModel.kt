@@ -254,11 +254,11 @@ class HomeViewModel(
         if (status.isOverLimit) {
             val upsell = when (profile.subscriptionTier) {
                 SubscriptionTier.FREE ->
-                    "Upgrade to Regular for \$9.99/month (\$99.99/year) for 50 chats/day, or Pro for \$19.99/month (\$199.99/year) for 150 chats/day."
+                    "Upgrade to Basic for \$9.99/month (\$99.99/year) for 50 chats/day, or Premium for \$19.99/month (\$199.99/year) for 150 chats/day."
                 SubscriptionTier.REGULAR ->
-                    "Upgrade to Pro for \$19.99/month (\$199.99/year) to raise your limit to 150 chats/day."
+                    "Upgrade to Premium for \$19.99/month (\$199.99/year) to raise your limit to 150 chats/day."
                 SubscriptionTier.PRO ->
-                    "You’ve hit the Pro daily limit."
+                    "You’ve hit the Premium daily limit."
             }
             _uiState.value = _uiState.value.copy(planGateNotice = "You have reached your daily limit.\n\n$upsell")
             return false
@@ -281,11 +281,11 @@ class HomeViewModel(
 
         val upsell = when (profile.subscriptionTier) {
             SubscriptionTier.FREE ->
-                "Upgrade to Regular for \$9.99/month (\$99.99/year) for up to 100 items, or Pro for \$19.99/month (\$199.99/year) for up to 500 items."
+                "Upgrade to Basic for \$9.99/month (\$99.99/year) for up to 100 items, or Premium for \$19.99/month (\$199.99/year) for up to 500 items."
             SubscriptionTier.REGULAR ->
-                "Upgrade to Pro for \$19.99/month (\$199.99/year) to raise your limit to 500 items."
+                "Upgrade to Premium for \$19.99/month (\$199.99/year) to raise your limit to 500 items."
             SubscriptionTier.PRO ->
-                "You’ve hit the Pro item limit."
+                "You’ve hit the Premium item limit."
         }
 
         _uiState.value = _uiState.value.copy(

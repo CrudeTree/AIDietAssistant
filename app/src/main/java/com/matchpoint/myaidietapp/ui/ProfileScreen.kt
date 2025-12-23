@@ -9,10 +9,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.Image
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -36,9 +38,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import com.matchpoint.myaidietapp.model.SavedRecipe
 import com.matchpoint.myaidietapp.model.SubscriptionTier
 import com.matchpoint.myaidietapp.model.UserProfile
+import com.matchpoint.myaidietapp.R
+import android.content.Intent
+import android.net.Uri
 
 @Composable
 fun ProfileScreen(
@@ -60,9 +67,10 @@ fun ProfileScreen(
     val tier = profile.subscriptionTier
     val tierLabel = when (tier) {
         SubscriptionTier.FREE -> "Free"
-        SubscriptionTier.REGULAR -> "Regular"
-        SubscriptionTier.PRO -> "Pro"
+        SubscriptionTier.REGULAR -> "Basic"
+        SubscriptionTier.PRO -> "Premium"
     }
+    val context = LocalContext.current
 
     Surface {
 
@@ -108,13 +116,39 @@ fun ProfileScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Plan: $tierLabel",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                OutlinedButton(onClick = onOpenChoosePlan) {
-                    Text("View / Upgrade")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "Plan: $tierLabel",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    if (tier == SubscriptionTier.REGULAR || tier == SubscriptionTier.PRO) {
+                        val badge = if (tier == SubscriptionTier.REGULAR) R.drawable.ic_basic_badge else R.drawable.ic_premium_badge
+                        Image(
+                            painter = painterResource(badge),
+                            contentDescription = null,
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .size(34.dp)
+                        )
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onOpenChoosePlan) {
+                        Text("View / Upgrade")
+                    }
+                }
+            }
+
+            if (tier != SubscriptionTier.FREE) {
+                OutlinedButton(
+                    onClick = {
+                        val uri = Uri.parse("https://play.google.com/store/account/subscriptions?package=${context.packageName}")
+                        context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Manage / cancel subscription (Google Play)")
                 }
             }
 

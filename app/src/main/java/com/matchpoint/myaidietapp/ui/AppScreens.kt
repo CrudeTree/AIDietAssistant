@@ -390,6 +390,15 @@ fun DigitalStomachApp() {
                     pendingUpgradeTier = tier
                     pendingUpgradeCycle = cycle
                     navigate(Screen.PAYMENT)
+                },
+                onManageSubscription = {
+                    // Cancellation/downgrade is managed by Google Play.
+                    // Send user to the Play subscriptions management screen for this app.
+                    val uri = android.net.Uri.parse(
+                        "https://play.google.com/store/account/subscriptions?package=${context.packageName}"
+                    )
+                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
+                    context.startActivity(intent)
                 }
             )
             else -> HomeScreen(
