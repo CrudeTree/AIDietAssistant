@@ -44,6 +44,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -71,6 +72,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalTime
 import androidx.compose.ui.unit.sp
+import com.matchpoint.myaidietapp.billing.RevenueCatEvent
+import com.matchpoint.myaidietapp.billing.RevenueCatRepository
 
 private enum class Screen {
     HOME,
@@ -197,6 +200,22 @@ fun DigitalStomachApp() {
         // Safe: vm exists if authUid != null
         val realVm = vm!!
         val state by realVm.uiState.collectAsState()
+
+        // Keep Firestore "subscriptionTier" in sync with RevenueCat entitlements.
+        // This prevents stale "Basic" in-app if a test sub expires/cancels in Play.
+        val rc = remember { RevenueCatRepository() }
+        LaunchedEffect(authUid) {
+            rc.refresh()
+            rc.events.collect { e ->
+                if (e is RevenueCatEvent.TierUpdated) {
+                    val currentTier = realVm.uiState.value.profile?.subscriptionTier
+                    if (currentTier != null && currentTier != e.tier) {
+                        realVm.updateSubscriptionTier(e.tier)
+                    }
+                }
+            }
+        }
+
         fun foodLimitFor(tier: com.matchpoint.myaidietapp.model.SubscriptionTier): Int = when (tier) {
             com.matchpoint.myaidietapp.model.SubscriptionTier.FREE -> 20
             com.matchpoint.myaidietapp.model.SubscriptionTier.REGULAR -> 100
