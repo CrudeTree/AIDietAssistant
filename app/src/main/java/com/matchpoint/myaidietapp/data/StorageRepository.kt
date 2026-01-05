@@ -33,7 +33,8 @@ class StorageRepository(
         val prefixes = listOf(
             "foodPhotos/$userId",
             "mealPhotos/$userId",
-            "groceryPhotos/$userId"
+            "groceryPhotos/$userId",
+            "menuPhotos/$userId"
         )
         prefixes.forEach { prefix ->
             try {

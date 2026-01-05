@@ -9,6 +9,7 @@ import com.matchpoint.myaidietapp.model.MessageEntry
 import com.matchpoint.myaidietapp.model.MessageLog
 import com.matchpoint.myaidietapp.model.ScheduledMealDay
 import com.matchpoint.myaidietapp.model.UserProfile
+import com.matchpoint.myaidietapp.model.WeightUnit
 import kotlinx.coroutines.tasks.await
 
 private const val USERS_COLLECTION = "users"
@@ -84,6 +85,10 @@ class UserRepository(
 
     suspend fun updateWeightGoal(weightGoal: Double?) {
         userDoc.update("weightGoal", weightGoal).await()
+    }
+
+    suspend fun updateWeightUnit(weightUnit: WeightUnit) {
+        userDoc.update("weightUnit", weightUnit).await()
     }
 
     suspend fun appendWeightEntry(entry: com.matchpoint.myaidietapp.model.WeightEntry) {

@@ -152,13 +152,6 @@ fun PaymentScreen(
             }
 
             OutlinedButton(
-                onClick = { rc.restore() },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Restore purchases")
-            }
-
-            OutlinedButton(
                 onClick = onBack,
                 modifier = Modifier.fillMaxWidth()
             ) {

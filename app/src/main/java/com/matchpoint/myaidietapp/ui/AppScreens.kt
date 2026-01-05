@@ -65,6 +65,7 @@ import com.matchpoint.myaidietapp.data.AuthRepository
 import com.matchpoint.myaidietapp.model.MessageSender
 import com.matchpoint.myaidietapp.model.FoodItem
 import com.matchpoint.myaidietapp.model.DietType
+import com.matchpoint.myaidietapp.model.WeightUnit
 import android.content.Context
 import java.io.File
 import android.net.Uri
@@ -73,7 +74,10 @@ import kotlinx.coroutines.launch
 import java.time.LocalTime
 import androidx.compose.ui.unit.sp
 import com.matchpoint.myaidietapp.billing.RevenueCatEvent
+import com.matchpoint.myaidietapp.billing.RevenueCatPackages
 import com.matchpoint.myaidietapp.billing.RevenueCatRepository
+import com.revenuecat.purchases.CustomerInfo
+import com.revenuecat.purchases.Offerings
 
 private enum class Screen {
     HOME,
@@ -85,6 +89,7 @@ private enum class Screen {
     PHOTO_CAPTURE,
     MEAL_LOG,
     GROCERY_SCAN,
+    MENU_SCAN,
     PAYMENT,
     CHOOSE_PLAN,
     RECIPE_DETAIL
@@ -93,6 +98,34 @@ private enum class Screen {
 enum class BillingCycle {
     MONTHLY,
     YEARLY
+}
+
+private fun inferCurrentBillingCycle(
+    customerInfo: CustomerInfo?,
+    offerings: Offerings?
+): BillingCycle? {
+    val info = customerInfo ?: return null
+    val activeProductIds = info.activeSubscriptions.toSet()
+    if (activeProductIds.isEmpty()) return null
+
+    val pkgs = offerings?.current?.availablePackages ?: return null
+    val activePkg = pkgs.firstOrNull { pkg ->
+        // activeSubscriptions contains store product IDs; match against the StoreProduct id.
+        val productId = runCatching { pkg.product.id }.getOrNull()
+        productId != null && activeProductIds.contains(productId)
+    } ?: return null
+
+    return when (activePkg.identifier) {
+        RevenueCatPackages.BASIC_MONTHLY, RevenueCatPackages.PREMIUM_MONTHLY -> BillingCycle.MONTHLY
+        RevenueCatPackages.BASIC_ANNUAL, RevenueCatPackages.PREMIUM_ANNUAL -> BillingCycle.YEARLY
+        else -> when {
+            activePkg.identifier.contains("annual", ignoreCase = true) ||
+                activePkg.identifier.contains("year", ignoreCase = true) -> BillingCycle.YEARLY
+            activePkg.identifier.contains("monthly", ignoreCase = true) ||
+                activePkg.identifier.contains("month", ignoreCase = true) -> BillingCycle.MONTHLY
+            else -> null
+        }
+    }
 }
 
 private enum class TextEntryMode {
@@ -204,16 +237,30 @@ fun DigitalStomachApp() {
         // Keep Firestore "subscriptionTier" in sync with RevenueCat entitlements.
         // This prevents stale "Basic" in-app if a test sub expires/cancels in Play.
         val rc = remember { RevenueCatRepository() }
+        val rcOfferings by rc.offerings.collectAsState()
+        val rcCustomerInfo by rc.customerInfo.collectAsState()
         LaunchedEffect(authUid) {
-            rc.refresh()
-            rc.events.collect { e ->
-                if (e is RevenueCatEvent.TierUpdated) {
-                    val currentTier = realVm.uiState.value.profile?.subscriptionTier
-                    if (currentTier != null && currentTier != e.tier) {
-                        realVm.updateSubscriptionTier(e.tier)
+            // On fresh dev machines, REVENUECAT_API_KEY may be unset; RevenueCatRepository will emit a
+            // non-fatal error event. Avoid spamming refresh calls in that case by gating here too.
+            if (com.matchpoint.myaidietapp.BuildConfig.REVENUECAT_API_KEY.isNotBlank()) {
+                rc.refresh()
+                rc.events.collect { e ->
+                    if (e is RevenueCatEvent.TierUpdated) {
+                        val currentTier = realVm.uiState.value.profile?.subscriptionTier
+                        if (currentTier != null && currentTier != e.tier) {
+                            realVm.updateSubscriptionTier(e.tier)
+                        }
                     }
                 }
             }
+        }
+
+        val currentTierForPlanUi =
+            rcCustomerInfo?.let { rc.tierFrom(it) }
+                ?: state.profile?.subscriptionTier
+                ?: com.matchpoint.myaidietapp.model.SubscriptionTier.FREE
+        val currentCycleForPlanUi = remember(rcCustomerInfo, rcOfferings) {
+            inferCurrentBillingCycle(rcCustomerInfo, rcOfferings)
         }
 
         fun foodLimitFor(tier: com.matchpoint.myaidietapp.model.SubscriptionTier): Int = when (tier) {
@@ -235,8 +282,8 @@ fun DigitalStomachApp() {
         when {
             state.isLoading -> LoadingScreen()
             state.profile == null -> OnboardingScreen(
-                onComplete = { name, goal, diet, weight, fasting, startMinutes ->
-                    realVm.completeOnboarding(name, goal, diet, weight, fasting, startMinutes)
+                onComplete = { name, goal, diet, weight, unit, fasting, startMinutes ->
+                    realVm.completeOnboarding(name, goal, diet, weight, unit, fasting, startMinutes)
                     goHomeClear()
                 }
             )
@@ -311,6 +358,15 @@ fun DigitalStomachApp() {
                 },
                 onCancel = { popOrHome() }
             )
+            screen == Screen.MENU_SCAN && state.profile != null -> MenuScanPhotoScreen(
+                isProcessing = state.isProcessing,
+                onUploadPhoto = { id, uri -> vm.uploadMenuPhoto(id, uri) },
+                onSubmit = { menuUrl ->
+                    vm.evaluateMenuScan(menuUrl)
+                    goHomeClear()
+                },
+                onCancel = { popOrHome() }
+            )
             screen == Screen.FOOD_LIST && state.profile != null -> FoodListScreen(
                 dietType = state.profile!!.dietType,
                 items = state.profile!!.foodItems,
@@ -371,6 +427,7 @@ fun DigitalStomachApp() {
                 onBack = { popOrHome() },
                 onToggleShowFoodIcons = { show -> vm.updateShowFoodIcons(show) },
                 onSetFontSizeSp = { sp -> vm.updateUiFontSizeSp(sp) },
+                onUpdateWeightUnit = { unit -> vm.updateWeightUnit(unit) },
                 onDietChange = { vm.updateDiet(it) },
                 onUpdateFastingPreset = { vm.updateFastingPreset(it) },
                 onUpdateEatingWindowStart = { vm.updateEatingWindowStart(it) },
@@ -402,7 +459,8 @@ fun DigitalStomachApp() {
                 }
             )
             screen == Screen.CHOOSE_PLAN && state.profile != null -> ChoosePlanScreen(
-                currentTier = state.profile!!.subscriptionTier,
+                currentTier = currentTierForPlanUi,
+                currentCycle = currentCycleForPlanUi,
                 notice = pendingPlanNotice,
                 onClose = { popOrHome() },
                 onPickPlan = { tier, cycle ->
@@ -432,6 +490,7 @@ fun DigitalStomachApp() {
                 onOpenProfile = { navigate(Screen.PROFILE) },
                 onOpenAddEntry = { navigate(Screen.ADD_ENTRY) },
                 onOpenGroceryScan = { navigate(Screen.GROCERY_SCAN) },
+                onOpenMenuScan = { navigate(Screen.MENU_SCAN) },
                 onGenerateMeal = { vm.generateMeal() },
                 onSaveRecipe = { messageId -> vm.saveRecipeFromMessage(messageId) },
                 onConfirmGroceryAdd = { vm.confirmAddPendingGrocery() },
@@ -462,6 +521,7 @@ fun OnboardingScreen(
         weightGoal: Double?,
         dietType: DietType,
         startingWeight: Double?,
+        weightUnit: WeightUnit,
         fastingPreset: com.matchpoint.myaidietapp.model.FastingPreset,
         eatingWindowStartMinutes: Int?
     ) -> Unit
@@ -475,6 +535,7 @@ fun OnboardingScreen(
     var fastingExpanded by remember { mutableStateOf(false) }
     var startExpanded by remember { mutableStateOf(false) }
     var selectedStartMinutes by remember { mutableStateOf<Int?>(null) }
+    var weightUnit by remember { mutableStateOf(WeightUnit.LB) }
 
     Column(
         modifier = Modifier
@@ -489,7 +550,7 @@ fun OnboardingScreen(
             fontWeight = FontWeight.Bold
         )
         Text(
-            text = "I’ll decide when and what to eat – you just follow.",
+            text = "A diet assistant to help you manage your food list, scan groceries/menus, and generate recipes.",
             style = MaterialTheme.typography.bodyMedium
         )
 
@@ -504,15 +565,36 @@ fun OnboardingScreen(
             value = weightText,
             onValueChange = { weightText = it },
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Current weight (optional)") }
+            label = { Text("Current weight (optional, ${if (weightUnit == WeightUnit.KG) "kg" else "lb"})") }
         )
 
         OutlinedTextField(
             value = goalWeightText,
             onValueChange = { goalWeightText = it },
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Goal weight (optional)") }
+            label = { Text("Goal weight (optional, ${if (weightUnit == WeightUnit.KG) "kg" else "lb"})") }
         )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Weight unit",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+            val lbSelected = weightUnit == WeightUnit.LB
+            if (lbSelected) {
+                Button(onClick = { weightUnit = WeightUnit.LB }) { Text("lb") }
+                OutlinedButton(onClick = { weightUnit = WeightUnit.KG }) { Text("kg") }
+            } else {
+                OutlinedButton(onClick = { weightUnit = WeightUnit.LB }) { Text("lb") }
+                Button(onClick = { weightUnit = WeightUnit.KG }) { Text("kg") }
+            }
+        }
         Spacer(modifier = Modifier.height(8.dp))
 
         Text(
@@ -683,6 +765,7 @@ fun OnboardingScreen(
                     goal,
                     selectedDiet,
                     weight,
+                    weightUnit,
                     selectedFasting,
                     selectedStartMinutes
                 )
@@ -705,6 +788,7 @@ fun HomeScreen(
     onOpenProfile: () -> Unit,
     onOpenAddEntry: () -> Unit,
     onOpenGroceryScan: () -> Unit,
+    onOpenMenuScan: () -> Unit,
     onGenerateMeal: () -> Unit,
     onSaveRecipe: (messageId: String) -> Unit,
     onConfirmGroceryAdd: () -> Unit,
@@ -749,27 +833,36 @@ fun HomeScreen(
 
         OutlinedButton(
             onClick = onOpenAddEntry,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.align(Alignment.CenterHorizontally)
         ) {
-            Text("+Meal, Snack, Ingredients")
+            Text("+ Meal, Snack, Ingredient")
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
         OutlinedButton(
             onClick = onOpenGroceryScan,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.align(Alignment.CenterHorizontally)
         ) {
-            Text("Grocery shopping scan")
+            Text("Grocery Shopping Scan")
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
         OutlinedButton(
             onClick = onGenerateMeal,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.align(Alignment.CenterHorizontally)
         ) {
-            Text("Generate meal")
+            Text("Generate Meal")
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedButton(
+            onClick = onOpenMenuScan,
+            modifier = Modifier.align(Alignment.CenterHorizontally)
+        ) {
+            Text("Menu Scan")
         }
 
         // Food list removed from AI Food Coach page (Home).
@@ -831,16 +924,16 @@ fun HomeScreen(
                         horizontalArrangement = if (isAi) Arrangement.Start else Arrangement.End
                     ) {
                         val annotated = MarkdownLite.toAnnotatedString(msg.text)
+                        val bubbleColor = if (isAi) Color(0xFFE6F4EA) else Color(0xFFEDE7F6)
+                        val bubbleTextColor = Color(0xFF1B1B1B)
                         Text(
                             text = annotated,
                             modifier = Modifier
-                                .background(
-                                    if (isAi) MaterialTheme.colorScheme.surfaceVariant
-                                    else MaterialTheme.colorScheme.primaryContainer
-                                )
-                                .padding(10.dp),
-                            color = if (isAi) MaterialTheme.colorScheme.onSurfaceVariant
-                            else MaterialTheme.colorScheme.onPrimaryContainer,
+                                .fillMaxWidth(0.84f)
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(bubbleColor)
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            color = bubbleTextColor,
                             style = MaterialTheme.typography.bodyMedium.copy(
                                 fontSize = fontSp.sp,
                                 lineHeight = (fontSp * 1.25f).sp

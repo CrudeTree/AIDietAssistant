@@ -38,8 +38,16 @@ enum class SubscriptionTier {
     PRO
 }
 
+enum class WeightUnit {
+    LB,
+    KG
+}
+
 data class WeightEntry(
     val date: String = "",
+    /**
+     * Stored in pounds (lb) internally; UI converts based on [UserProfile.weightUnit].
+     */
     val weight: Double = 0.0
 )
 
@@ -130,6 +138,11 @@ data class FoodItem(
 
 data class UserProfile(
     val name: String = "",
+    /**
+     * Preferred display/input unit for weights. Defaults to LB for new users.
+     * Internally, weights are stored in pounds (lb).
+     */
+    val weightUnit: WeightUnit = WeightUnit.LB,
     val weightGoal: Double? = null,
     val dietType: DietType = DietType.CARNIVORE,
     // Pricing tier (local MVP; later should be driven by Play Billing + server checks)

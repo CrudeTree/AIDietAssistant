@@ -42,6 +42,7 @@ import com.matchpoint.myaidietapp.model.SubscriptionTier
 @Composable
 fun ChoosePlanScreen(
     currentTier: SubscriptionTier,
+    currentCycle: BillingCycle?,
     notice: String?,
     onClose: () -> Unit,
     onPickPlan: (SubscriptionTier, BillingCycle) -> Unit,
@@ -56,7 +57,17 @@ fun ChoosePlanScreen(
         SubscriptionTier.PRO -> 2
     }
     val isUpgrade = tierRank(selectedTier) > tierRank(currentTier)
-    val canProceed = selectedTier != currentTier
+
+    fun isSamePlan(tier: SubscriptionTier, selectedCycle: BillingCycle): Boolean {
+        if (tier != currentTier) return false
+        // Free plan has no billing cycle.
+        if (tier == SubscriptionTier.FREE) return true
+        // If we don't know the current cycle (e.g. RevenueCat not yet loaded), fall back to tier-only comparison.
+        val cc = currentCycle ?: return true
+        return cc == selectedCycle
+    }
+
+    val canProceed = !isSamePlan(selectedTier, cycle)
 
     val basicPrice = if (cycle == BillingCycle.YEARLY) "$99.99/year" else "$9.99/month"
     val premiumPrice = if (cycle == BillingCycle.YEARLY) "$199.99/year" else "$19.99/month"
@@ -123,7 +134,9 @@ fun ChoosePlanScreen(
                 bullets = listOf("50 chats/day", "100 food items"),
                 selected = selectedTier == SubscriptionTier.REGULAR,
                 enabled = true,
-                isCurrent = currentTier == SubscriptionTier.REGULAR,
+                isCurrent = currentTier == SubscriptionTier.REGULAR &&
+                    // Only mark as current on the correct cycle tab (monthly vs yearly).
+                    (currentCycle == null || currentCycle == cycle),
                 badgeResId = R.drawable.ic_basic_badge,
                 onClick = { selectedTier = SubscriptionTier.REGULAR }
             )
@@ -133,7 +146,9 @@ fun ChoosePlanScreen(
                 bullets = listOf("150 chats/day", "500 food items"),
                 selected = selectedTier == SubscriptionTier.PRO,
                 enabled = true,
-                isCurrent = currentTier == SubscriptionTier.PRO,
+                isCurrent = currentTier == SubscriptionTier.PRO &&
+                    // Only mark as current on the correct cycle tab (monthly vs yearly).
+                    (currentCycle == null || currentCycle == cycle),
                 badgeResId = R.drawable.ic_premium_badge,
                 onClick = { selectedTier = SubscriptionTier.PRO }
             )

@@ -1,6 +1,7 @@
 package com.matchpoint.myaidietapp.ui
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.appendInlineContent
@@ -217,7 +218,8 @@ private fun buildAnnotatedWithIcons(
                 Image(
                     painter = painterResource(id = h.resId),
                     contentDescription = h.phrase,
-                    modifier = Modifier.size(18.dp)
+                    // Let the icon scale to the placeholder size (driven by iconSize param).
+                    modifier = Modifier.fillMaxSize()
                 )
             }
 

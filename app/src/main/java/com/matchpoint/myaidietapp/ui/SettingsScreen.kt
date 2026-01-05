@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import com.matchpoint.myaidietapp.model.DietType
 import com.matchpoint.myaidietapp.model.FastingPreset
 import com.matchpoint.myaidietapp.model.UserProfile
+import com.matchpoint.myaidietapp.model.WeightUnit
 
 @Composable
 fun SettingsScreen(
@@ -56,6 +57,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onToggleShowFoodIcons: (Boolean) -> Unit,
     onSetFontSizeSp: (Float) -> Unit,
+    onUpdateWeightUnit: (WeightUnit) -> Unit,
     onDietChange: (DietType) -> Unit,
     onUpdateFastingPreset: (FastingPreset) -> Unit,
     onUpdateEatingWindowStart: (Int) -> Unit,
@@ -221,6 +223,30 @@ fun SettingsScreen(
                 text = "Preview: This is what recipes and chat will look like.",
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = fontSize.sp)
             )
+
+            // --- Units ---
+            Text(
+                text = "Units",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "Weight unit", style = MaterialTheme.typography.bodyMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val lbSelected = profile.weightUnit == WeightUnit.LB
+                    if (lbSelected) {
+                        Button(onClick = { onUpdateWeightUnit(WeightUnit.LB) }, enabled = !isProcessing) { Text("lb") }
+                        OutlinedButton(onClick = { onUpdateWeightUnit(WeightUnit.KG) }, enabled = !isProcessing) { Text("kg") }
+                    } else {
+                        OutlinedButton(onClick = { onUpdateWeightUnit(WeightUnit.LB) }, enabled = !isProcessing) { Text("lb") }
+                        Button(onClick = { onUpdateWeightUnit(WeightUnit.KG) }, enabled = !isProcessing) { Text("kg") }
+                    }
+                }
+            }
 
             // --- Diet & fasting ---
             Text(

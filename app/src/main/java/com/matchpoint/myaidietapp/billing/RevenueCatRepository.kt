@@ -40,12 +40,33 @@ class RevenueCatRepository {
     private val _events = MutableSharedFlow<RevenueCatEvent>(extraBufferCapacity = 8)
     val events = _events.asSharedFlow()
 
+    private fun purchasesOrNull(): Purchases? {
+        return try {
+            Purchases.sharedInstance
+        } catch (_: UninitializedPropertyAccessException) {
+            null
+        } catch (_: IllegalStateException) {
+            // Defensive: some SDK versions throw IllegalStateException when not configured.
+            null
+        }
+    }
+
     fun refresh() {
-        Purchases.sharedInstance.getOfferingsWith(
+        val p = purchasesOrNull()
+        if (p == null) {
+            _events.tryEmit(
+                RevenueCatEvent.Error(
+                    "Subscriptions unavailable: RevenueCat is not configured on this build (missing REVENUECAT_API_KEY)."
+                )
+            )
+            return
+        }
+
+        p.getOfferingsWith(
             onError = { err -> _events.tryEmit(RevenueCatEvent.Error(err.safeMessage())) },
             onSuccess = { o -> _offerings.value = o }
         )
-        Purchases.sharedInstance.getCustomerInfoWith(
+        p.getCustomerInfoWith(
             onError = { err -> _events.tryEmit(RevenueCatEvent.Error(err.safeMessage())) },
             onSuccess = { info ->
                 _customerInfo.value = info
@@ -55,7 +76,17 @@ class RevenueCatRepository {
     }
 
     fun purchase(activity: Activity, pkg: Package) {
-        Purchases.sharedInstance.purchasePackageWith(
+        val p = purchasesOrNull()
+        if (p == null) {
+            _events.tryEmit(
+                RevenueCatEvent.Error(
+                    "Subscriptions unavailable: RevenueCat is not configured on this build (missing REVENUECAT_API_KEY)."
+                )
+            )
+            return
+        }
+
+        p.purchasePackageWith(
             activity = activity,
             packageToPurchase = pkg,
             onError = { err, userCancelled ->
@@ -69,7 +100,17 @@ class RevenueCatRepository {
     }
 
     fun restore() {
-        Purchases.sharedInstance.restorePurchasesWith(
+        val p = purchasesOrNull()
+        if (p == null) {
+            _events.tryEmit(
+                RevenueCatEvent.Error(
+                    "Subscriptions unavailable: RevenueCat is not configured on this build (missing REVENUECAT_API_KEY)."
+                )
+            )
+            return
+        }
+
+        p.restorePurchasesWith(
             onError = { err -> _events.tryEmit(RevenueCatEvent.Error(err.safeMessage())) },
             onSuccess = { info ->
                 _customerInfo.value = info

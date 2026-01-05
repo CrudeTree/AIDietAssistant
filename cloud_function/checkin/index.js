@@ -2,6 +2,7 @@
 // Cloud Function name: checkin
 const functions = require('@google-cloud/functions-framework');
 const admin = require('firebase-admin');
+const crypto = require('crypto');
 
 // Admin SDK for verifying Firebase Auth tokens + server-side quota enforcement.
 // In Cloud Functions, this uses the default service account credentials.
@@ -41,6 +42,50 @@ function asNullableInt(x) {
   const n = Number(x);
   if (!Number.isFinite(n)) return null;
   return Math.round(n);
+}
+
+function clampInt(n, min, max) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return min;
+  return Math.min(max, Math.max(min, Math.round(x)));
+}
+
+function clampScore10(n) {
+  // Ratings in this app are always 1–10. Be defensive if the model returns 0–100 etc.
+  return clampInt(n, 1, 10);
+}
+
+function clampScore10Nullable(n) {
+  if (n === null || n === undefined) return null;
+  const x = Number(n);
+  if (!Number.isFinite(x)) return null;
+  return clampScore10(x);
+}
+
+function normalizeFoodCacheKey(s) {
+  const raw = String(s || '').trim().toLowerCase();
+  return raw.replace(/\s+/g, ' ').slice(0, 120);
+}
+
+function normalizeDietKey(s) {
+  const v = String(s || '').trim().toUpperCase();
+  return v || 'UNKNOWN';
+}
+
+function foodCacheDocId(version, normalizedKey) {
+  // Use a short hash to avoid Firestore doc ID edge cases and keep it deterministic.
+  const h = crypto.createHash('sha256').update(normalizedKey).digest('hex').slice(0, 16);
+  return `food_v${version}_${h}`;
+}
+
+function hashUid(uid) {
+  // Stable, non-PII identifier for logs.
+  return crypto.createHash('sha256').update(String(uid || '')).digest('hex').slice(0, 10);
+}
+
+function logEvent(name, fields) {
+  // Structured logs are easier to filter in Cloud Logging.
+  console.log(JSON.stringify({ event: name, ...fields }));
 }
 
 function normalizeCategory(x) {
@@ -114,6 +159,9 @@ functions.http('checkin', async (req, res) => {
       mealGrams,
       mealText,
 
+      // Menu scan
+      menuPhotoUrl,
+
       // Batch text analysis
       foodNames
     } = req.body || {};
@@ -135,6 +183,7 @@ functions.http('checkin', async (req, res) => {
 
     const uid = decoded.uid;
     const db = admin.firestore();
+    const FOOD_CACHE_VERSION = 1;
 
     // Load user profile to determine tier limits (server-side source of truth).
     const userSnap = await db.collection('users').doc(uid).get();
@@ -145,6 +194,55 @@ functions.http('checkin', async (req, res) => {
       if (t === 'PRO') return 150;
       if (t === 'REGULAR') return 50;
       return 5; // FREE
+    }
+
+    // Separate budget for "expensive" analysis calls (vision + food analysis).
+    // These are cost drivers and should be rate-limited independently from chat.
+    function dailyAnalysisLimitForTier(t) {
+      // Allow env overrides without redeploying code (optional).
+      const free = Number(process.env.DAILY_ANALYSIS_LIMIT_FREE || 30);
+      const regular = Number(process.env.DAILY_ANALYSIS_LIMIT_REGULAR || 200);
+      const pro = Number(process.env.DAILY_ANALYSIS_LIMIT_PRO || 800);
+      if (t === 'PRO') return pro;
+      if (t === 'REGULAR') return regular;
+      return free; // FREE
+    }
+
+    async function tryConsumeAnalysisQuota(cost) {
+      const now = new Date();
+      const dayKey = now.toISOString().slice(0, 10); // YYYY-MM-DD (UTC) for MVP
+      const limit = dailyAnalysisLimitForTier(tier);
+      const usageRef = db.collection('users').doc(uid).collection('meta').doc('usageDaily').collection('days').doc(dayKey);
+
+      const c = Number(cost);
+      const inc = Number.isFinite(c) ? Math.max(1, Math.round(c)) : 1;
+
+      try {
+        await db.runTransaction(async (tx) => {
+          const snap = await tx.get(usageRef);
+          const used = snap.exists ? Number(snap.data()?.analysisCount || 0) : 0;
+          if (used + inc > limit) {
+            const err = new Error('DAILY_ANALYSIS_LIMIT_REACHED');
+            err.code = 'LIMIT_ANALYSIS';
+            throw err;
+          }
+          tx.set(
+            usageRef,
+            {
+              analysisCount: used + inc,
+              tier,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            },
+            { merge: true }
+          );
+        });
+        return true;
+      } catch (e) {
+        if (e?.code === 'LIMIT_ANALYSIS') return false;
+        console.error('analysis quota transaction failed', e);
+        // Fail closed to protect spend if quota check infrastructure is failing.
+        return false;
+      }
     }
 
     // Count only "chat submissions" (not food photo analysis):
@@ -201,6 +299,73 @@ functions.http('checkin', async (req, res) => {
 
     // ---------- 1) FOOD ANALYSIS MODE (vision + optional text) ----------
     if (mode === 'analyze_food') {
+      const isTextOnly = !!lastMeal && !productUrl && !labelUrl && !nutritionFactsUrl;
+      const uidHash = hashUid(uid);
+
+      // Global cache (shared across users) for text-only analysis so common foods don't cost extra calls.
+      // Cache is keyed ONLY by the input food string (diet-neutral),
+      // so all users get the same description payload.
+      const cacheKey = isTextOnly ? normalizeFoodCacheKey(lastMeal) : null;
+      if (isTextOnly && cacheKey) {
+        try {
+          const docId = foodCacheDocId(FOOD_CACHE_VERSION, cacheKey);
+          const snap = await db.collection('foodCatalog').doc(docId).get();
+          if (snap.exists) {
+            const data = snap.data() || {};
+            if (data.version === FOOD_CACHE_VERSION && data.payload) {
+              logEvent('food_cache_hit', {
+                uid: uidHash,
+                tier,
+                mode: 'analyze_food',
+                key: cacheKey,
+                docId
+              });
+              return res.json({ text: String(data.payload) });
+            }
+          }
+        } catch (e) {
+          // Cache is best-effort; ignore failures and fall through to OpenAI.
+          console.warn('food cache read failed', e?.message || e);
+        }
+        logEvent('food_cache_miss', { uid: uidHash, tier, mode: 'analyze_food', key: cacheKey });
+      }
+
+      // Basic input validation (prevents weird URLs from being sent to OpenAI).
+      function isAllowedImageUrl(u) {
+        if (!u) return false;
+        const s = String(u).trim();
+        if (!s.startsWith('https://')) return false;
+        if (s.length > 2000) return false;
+        // Only allow Firebase Storage / GCS download URLs from this project.
+        return s.includes('firebasestorage.googleapis.com') || s.includes('storage.googleapis.com');
+      }
+      if (productUrl && !isAllowedImageUrl(productUrl)) {
+        return res.status(400).json({ text: 'INVALID_PRODUCT_URL' });
+      }
+      if (labelUrl && !isAllowedImageUrl(labelUrl)) {
+        return res.status(400).json({ text: 'INVALID_LABEL_URL' });
+      }
+      if (nutritionFactsUrl && !isAllowedImageUrl(nutritionFactsUrl)) {
+        return res.status(400).json({ text: 'INVALID_NUTRITION_URL' });
+      }
+      if (!isTextOnly && !productUrl && !labelUrl && !nutritionFactsUrl) {
+        return res.status(400).json({ text: 'NO_INPUTS' });
+      }
+
+      // Quota gate: only charge quota if we are about to call OpenAI.
+      // - text-only cache hits returned above don't consume quota
+      // - text-only cache misses DO consume quota (1)
+      // - image analysis consumes quota (1)
+      const willCallOpenAi = true;
+      if (willCallOpenAi) {
+        const ok = await tryConsumeAnalysisQuota(1);
+        if (!ok) {
+          logEvent('analysis_quota_denied', { uid: uidHash, tier, mode: 'analyze_food', cost: 1 });
+          return res.status(429).json({ text: 'DAILY_LIMIT_REACHED' });
+        }
+        logEvent('analysis_quota_consumed', { uid: uidHash, tier, mode: 'analyze_food', cost: 1 });
+      }
+
       const instructions = `
 You are a nutrition coach.
 
@@ -211,7 +376,7 @@ Inputs you may receive:
   3) nutrition facts photo (optional)
 - OR text-only name/description (Food name) if no images were provided.
 
-Diet context for the *current user setting*: ${dietType || "unknown"}.
+Diet context: do NOT tailor the wording to the user's diet. Your description must be diet-neutral.
 
 Your job:
 1) Infer what the product or meal is (a short, normalized FOOD or MEAL name).
@@ -222,8 +387,7 @@ Your job:
    Put them in:
    - "dietRatings": { "CARNIVORE": 2, "VEGAN": 9, ... }
 4) "dietFitRating":
-   - MUST match the rating for the current dietType if that dietType is one of the keys above.
-   - If dietType is unknown, set dietFitRating = rating.
+   - Set dietFitRating = rating (diet-neutral). The app will select the correct diet-specific score from dietRatings.
 5) Allergy “fit/safety” ratings (1–10) for common allergies:
    - Keys:
      PEANUT, TREE_NUT, DAIRY, EGG, SOY, WHEAT_GLUTEN, SESAME, FISH, SHELLFISH
@@ -336,13 +500,21 @@ No extra keys. No markdown. No text outside JSON.
       try {
         parsed = extractJsonObject(contentText);
 
-        // Ensure dietFitRating exists and matches the selected diet if possible
-        if (typeof parsed.dietFitRating !== 'number') {
-          const key = (dietType || '').toUpperCase();
-          parsed.dietFitRating =
-            (parsed.dietRatings && typeof parsed.dietRatings[key] === 'number')
-              ? parsed.dietRatings[key]
-              : parsed.rating;
+        // dietFitRating is diet-neutral in this app; default it to rating.
+        if (typeof parsed.dietFitRating !== 'number') parsed.dietFitRating = parsed.rating;
+
+        // Clamp ratings (1-10) defensively in case the model returns 0-100 etc.
+        parsed.rating = clampScore10(parsed.rating);
+        parsed.dietFitRating = clampScore10(parsed.dietFitRating);
+        if (parsed.dietRatings && typeof parsed.dietRatings === 'object') {
+          for (const k of Object.keys(parsed.dietRatings)) {
+            parsed.dietRatings[k] = clampScore10(parsed.dietRatings[k]);
+          }
+        }
+        if (parsed.allergyRatings && typeof parsed.allergyRatings === 'object') {
+          for (const k of Object.keys(parsed.allergyRatings)) {
+            parsed.allergyRatings[k] = clampScore10(parsed.allergyRatings[k]);
+          }
         }
 
         // Normalize nullable nutrition ints
@@ -383,6 +555,29 @@ No extra keys. No markdown. No text outside JSON.
         };
       }
 
+      // Best-effort write-through cache for text-only analysis.
+      if (isTextOnly && cacheKey && parsed && parsed.accepted === true) {
+        try {
+          const docId = foodCacheDocId(FOOD_CACHE_VERSION, cacheKey);
+          await db.collection('foodCatalog').doc(docId).set(
+            {
+              version: FOOD_CACHE_VERSION,
+              key: cacheKey,
+              normalizedName: parsed.normalizedName || '',
+              rating: parsed.rating,
+              dietFitRating: parsed.dietFitRating,
+              // Store as a string payload so we can return it verbatim and avoid re-serialization diffs.
+              payload: JSON.stringify(parsed),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            },
+            { merge: true }
+          );
+          logEvent('food_cache_write', { uid: uidHash, tier, mode: 'analyze_food', key: cacheKey });
+        } catch (e) {
+          console.warn('food cache write failed', e?.message || e);
+        }
+      }
+
       return res.json({ text: JSON.stringify(parsed) });
     }
 
@@ -392,11 +587,88 @@ No extra keys. No markdown. No text outside JSON.
       if (names.length === 0) {
         return res.status(400).json({ text: 'NO_FOOD_NAMES' });
       }
+      const uidHash = hashUid(uid);
       // Safety cap to keep token usage bounded. Client can chunk requests.
       const MAX_BATCH = Number(process.env.ANALYZE_FOOD_BATCH_MAX || 25);
       if (names.length > MAX_BATCH) {
         return res.status(400).json({ text: 'TOO_MANY_FOOD_NAMES' });
       }
+
+      // Try cache for each name first; only send misses to OpenAI.
+      const cacheKeys = names.map(normalizeFoodCacheKey);
+      const docIds = cacheKeys.map((k) => foodCacheDocId(FOOD_CACHE_VERSION, k));
+      const docRefs = docIds.map((id) => db.collection('foodCatalog').doc(id));
+
+      const cachedPayloads = await Promise.all(
+        docRefs.map(async (ref) => {
+          try {
+            const snap = await ref.get();
+            if (!snap.exists) return null;
+            const d = snap.data() || {};
+            if (d.version !== FOOD_CACHE_VERSION || !d.payload) return null;
+            return String(d.payload);
+          } catch (_) {
+            return null;
+          }
+        })
+      );
+
+      const results = new Array(names.length).fill(null);
+      const misses = [];
+      const missIndexes = [];
+
+      for (let i = 0; i < names.length; i++) {
+        const payload = cachedPayloads[i];
+        if (payload) {
+          try {
+            results[i] = JSON.parse(payload);
+          } catch (_) {
+            // Treat invalid cache as miss
+            results[i] = null;
+          }
+        }
+        if (!results[i]) {
+          misses.push(names[i]);
+          missIndexes.push(i);
+        }
+      }
+
+      // If everything was cached, return immediately.
+      if (misses.length === 0) {
+        logEvent('food_batch_cache_all_hit', {
+          uid: uidHash,
+          tier,
+          mode: 'analyze_food_batch',
+          total: names.length,
+          hits: names.length,
+          misses: 0
+        });
+        return res.json({ text: JSON.stringify(results) });
+      }
+
+      // Quota gate: cost equals the number of misses (the number of items we'll ask OpenAI to analyze).
+      const ok = await tryConsumeAnalysisQuota(misses.length);
+      if (!ok) {
+        logEvent('analysis_quota_denied', {
+          uid: uidHash,
+          tier,
+          mode: 'analyze_food_batch',
+          cost: misses.length,
+          total: names.length,
+          hits: names.length - misses.length,
+          misses: misses.length
+        });
+        return res.status(429).json({ text: 'DAILY_LIMIT_REACHED' });
+      }
+      logEvent('analysis_quota_consumed', {
+        uid: uidHash,
+        tier,
+        mode: 'analyze_food_batch',
+        cost: misses.length,
+        total: names.length,
+        hits: names.length - misses.length,
+        misses: misses.length
+      });
 
       const instructions = `
 You are a nutrition coach.
@@ -430,7 +702,7 @@ Rules:
 
       const fullPrompt = [
         `Food names (in order):`,
-        ...names.map((n, i) => `${i + 1}) ${n}`),
+        ...misses.map((n, i) => `${i + 1}) ${n}`),
         '',
         instructions
       ].join('\n');
@@ -468,7 +740,7 @@ Rules:
         parsed = extractJsonArray(contentText);
         if (!Array.isArray(parsed)) throw new Error('Expected array');
 
-        // Normalize nutrition ints + ensure ingredientsText string
+        // Normalize nutrition ints + ensure ingredientsText string + clamp ratings 1-10
         parsed = parsed.map((x) => {
           const o = x || {};
           o.estimatedCalories = (o.estimatedCalories === null || o.estimatedCalories === undefined)
@@ -484,6 +756,18 @@ Rules:
             ? null
             : asNullableInt(o.estimatedFatG);
           if (typeof o.ingredientsText !== 'string') o.ingredientsText = '';
+          if (typeof o.rating === 'number') o.rating = clampScore10(o.rating);
+          if (typeof o.dietFitRating === 'number') o.dietFitRating = clampScore10(o.dietFitRating);
+          if (o.dietRatings && typeof o.dietRatings === 'object') {
+            for (const k of Object.keys(o.dietRatings)) {
+              o.dietRatings[k] = clampScore10(o.dietRatings[k]);
+            }
+          }
+          if (o.allergyRatings && typeof o.allergyRatings === 'object') {
+            for (const k of Object.keys(o.allergyRatings)) {
+              o.allergyRatings[k] = clampScore10(o.allergyRatings[k]);
+            }
+          }
           return o;
         });
       } catch (e) {
@@ -491,11 +775,131 @@ Rules:
         return res.status(502).json({ text: 'Invalid JSON from model' });
       }
 
-      return res.json({ text: JSON.stringify(parsed) });
+      // Fill misses back into the original order and write-through cache (best-effort).
+      for (let j = 0; j < parsed.length; j++) {
+        const idx = missIndexes[j];
+        results[idx] = parsed[j];
+      }
+
+      // Cache accepted results only (don't store nonsense like "rock").
+      await Promise.all(
+        parsed.map(async (o, j) => {
+          const idx = missIndexes[j];
+          const key = cacheKeys[idx];
+          if (!o || o.accepted !== true) return;
+          try {
+            const docId = foodCacheDocId(FOOD_CACHE_VERSION, key);
+            await db.collection('foodCatalog').doc(docId).set(
+              {
+                version: FOOD_CACHE_VERSION,
+                key,
+                normalizedName: o.normalizedName || '',
+                rating: o.rating,
+                dietFitRating: o.dietFitRating,
+                payload: JSON.stringify(o),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+              },
+              { merge: true }
+            );
+          } catch (_) {
+            // ignore cache write errors
+          }
+        })
+      );
+
+      logEvent('food_batch_cache_write', {
+        uid: uidHash,
+        tier,
+        mode: 'analyze_food_batch',
+        cachedCount: parsed.filter((o) => o && o.accepted === true).length,
+        total: names.length
+      });
+
+      return res.json({ text: JSON.stringify(results) });
+    }
+
+    // ---------- 1b) MEAL ANALYSIS MODE (meal photo + grams/text) ----------
+    if (mode === 'menu_scan') {
+      const uidHash = hashUid(uid);
+      // Basic input validation: only allow Firebase/GCS URLs.
+      if (!menuPhotoUrl || typeof menuPhotoUrl !== 'string' || !String(menuPhotoUrl).startsWith('https://')) {
+        return res.status(400).json({ text: 'NO_MENU_PHOTO' });
+      }
+      const murl = String(menuPhotoUrl).trim();
+      if (murl.length > 2000 || !(murl.includes('firebasestorage.googleapis.com') || murl.includes('storage.googleapis.com'))) {
+        return res.status(400).json({ text: 'INVALID_MENU_URL' });
+      }
+
+      const ok = await tryConsumeAnalysisQuota(1);
+      if (!ok) {
+        logEvent('analysis_quota_denied', { uid: uidHash, tier, mode: 'menu_scan', cost: 1 });
+        return res.status(429).json({ text: 'DAILY_LIMIT_REACHED' });
+      }
+      logEvent('analysis_quota_consumed', { uid: uidHash, tier, mode: 'menu_scan', cost: 1 });
+
+      const instructions = `
+You are a nutrition coach helping a user order at a restaurant.
+
+You will be given a PHOTO of a restaurant MENU.
+Diet context for the current user setting: ${dietType || "unknown"}.
+
+Known foods/inventory summary (optional; may be unrelated to restaurant): ${safeInventorySummary || "unknown"}.
+
+Your job:
+1) Read the menu items as best you can from the photo.
+2) Recommend the TOP 3 best options for the user's diet.
+3) For each option:
+   - Give the exact menu item name (or closest match if text is unclear)
+   - Give 1–2 sentence reasoning tied to the diet
+   - Give 1–3 simple modifications (e.g., "no bun", "swap fries for salad", "sauce on side")
+4) Also list 3 "Avoid" items that are likely worst for the diet, with a short reason.
+5) If the photo is too blurry/unreadable, ask the user to retake the photo and give tips (closer, better lighting, no glare).
+
+Return plain text only. No JSON. Keep it concise and actionable.
+      `.trim();
+
+      const content = [];
+      if (menuPhotoUrl) content.push({ type: 'image_url', image_url: { url: menuPhotoUrl } });
+      content.push({ type: 'text', text: instructions });
+
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: pickModel({ isVision: true }),
+          messages: [
+            { role: 'system', content: 'You are a helpful nutrition coach. Be practical and decisive.' },
+            { role: 'user', content }
+          ],
+          temperature: 0.4
+        })
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text();
+        console.error('OpenAI menu_scan error', resp.status, text);
+        return res.status(502).json({ text: 'Service unavailable.' });
+      }
+
+      const data = await resp.json();
+      const text = data.choices?.[0]?.message?.content?.trim() || 'Service unavailable.';
+      return res.json({ text });
     }
 
     // ---------- 1b) MEAL ANALYSIS MODE (meal photo + grams/text) ----------
     if (mode === 'analyze_meal') {
+      const uidHash = hashUid(uid);
+      // Only count quota if we're about to call OpenAI.
+      const ok = await tryConsumeAnalysisQuota(1);
+      if (!ok) {
+        logEvent('analysis_quota_denied', { uid: uidHash, tier, mode: 'analyze_meal', cost: 1 });
+        return res.status(429).json({ text: 'DAILY_LIMIT_REACHED' });
+      }
+      logEvent('analysis_quota_consumed', { uid: uidHash, tier, mode: 'analyze_meal', cost: 1 });
+
       const instructions = `
 You are a nutrition coach helping estimate meal size.
 
@@ -598,7 +1002,7 @@ No extra keys. No markdown. No text outside JSON.
       const preset = normalizeCategory(fastingPreset) || 'NONE';
 
       const instructions = `
-You are an AI Food Coach. The user wants a MEAL recipe they can cook.
+You are a diet assistant. The user wants a MEAL recipe they can cook.
 
 Diet type: ${dietType || "unknown"}.
 User local time (minutes from midnight): ${localMinutes}.
@@ -683,7 +1087,7 @@ Notes / swaps (only using my list): <short>
     const minsToOpen = hasWindow && !insideWindow ? minutesUntilWindowStart(localMinutes, windowStart) : 0;
 
     const contextLines = [
-      "You are a short, casual, varied assistant and nutrition coach.",
+      "You are a short, casual, varied diet assistant inside a diet-management app.",
       `Diet type: ${dietType || "unknown"}.`,
       `Fasting preset: ${fastingPreset || "NONE"}.`,
       `Eating window minutes: ${hasWindow ? `${windowStart}-${windowEnd}` : "none"}.`,
@@ -701,30 +1105,30 @@ Notes / swaps (only using my list): <short>
     ];
 
     const behavior = `
-You are a general assistant AND a strict but caring nutrition coach.
+You are a general assistant AND a helpful diet-management coach for this app.
 
-VERY IMPORTANT:
-- If the user's message is NOT about food, hunger, diet, weight, meals, cooking, fasting window, or this app, IGNORE all food-coach rules below and DO NOT mention eating at all. Just answer like a normal assistant.
-- If the user IS talking about food, hunger, diet, weight, when to eat, what to eat, cooking, cravings, fasting window, or this app, then you enter FOOD COACH MODE.
+IMPORTANT:
+- If the user's message is NOT about food, diet, recipes, grocery/menu choices, fasting/eating window, or this app, answer like a normal assistant. Do NOT bring up eating windows or dieting.
 
-FOOD COACH MODE:
-- The user does NOT decide what to eat; you decide based on diet + lists + timing window.
-- Never ask "Do you want to eat now?" — either say not yet, or tell them what to eat/do.
+This app's scope (be consistent with it):
+- Users set a diet type and optionally an eating window (informational).
+- Users can add foods to their list.
+- You help generate recipes from their list.
+- You can give a quick health/diet-fit opinion on foods (e.g. grocery scan) and help pick menu items (menu scan).
+- The app does NOT do calorie counting and does NOT track what the user already ate today.
+- Do NOT act like you are "in control" of the user or telling them exactly when to eat. If asked about their eating window, explain it and let them decide.
 
-Timing rules:
-- If the user has an eating window and we are OUTSIDE it:
-  - Do NOT tell them to eat.
-  - If they ask "can I eat", answer: "not yet" + how long until the window opens (use the provided Minutes until window opens).
-- If we are INSIDE the window:
-  - If they are asking for cooking ideas, use INGREDIENTS to propose a meal (step-based if asked).
-  - If they ask for something to eat, pick from Meals/Snacks list; prefer higher health + diet-fit.
-
-Inventory rules:
+When user asks for a recipe:
 - Use categorized lists: Meals, Ingredients, Snacks.
-- If asked "cook for dinner", choose a meal recipe primarily from INGREDIENTS. If too sparse, say what’s missing and suggest a small shopping list.
+- Build meals primarily from INGREDIENTS (and SNACKS only if they reasonably fit in cooking).
+- If ingredients are too sparse, say what’s missing and suggest a short shopping list.
+
+When user asks “Can I eat?” / timing questions:
+- If there is an eating window, tell them whether they are inside it and the window hours.
+- Keep it informational and supportive (no commanding tone).
 
 Response length:
-- For mode "freeform": keep it short (1–3 sentences).
+- For mode "freeform": keep it short (1–3 sentences) unless the user asks for detail.
 - For mode "generate_meal": handled separately above.
 `.trim();
 

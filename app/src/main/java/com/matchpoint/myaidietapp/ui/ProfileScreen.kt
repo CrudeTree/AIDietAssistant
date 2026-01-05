@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -43,6 +45,7 @@ import androidx.compose.ui.res.painterResource
 import com.matchpoint.myaidietapp.model.SavedRecipe
 import com.matchpoint.myaidietapp.model.SubscriptionTier
 import com.matchpoint.myaidietapp.model.UserProfile
+import com.matchpoint.myaidietapp.model.WeightUnit
 import com.matchpoint.myaidietapp.R
 import android.content.Intent
 import android.net.Uri
@@ -64,6 +67,16 @@ fun ProfileScreen(
     onOpenRecipe: (SavedRecipe) -> Unit,
     onOpenSettings: () -> Unit
 ) {
+    val unit = profile.weightUnit
+    fun lbToKg(lb: Double): Double = lb / 2.2046226218
+    fun fromLb(lb: Double): Double = if (unit == WeightUnit.KG) lbToKg(lb) else lb
+    fun formatWeight(lb: Double): String {
+        val v = fromLb(lb)
+        val rounded = kotlin.math.round(v * 10.0) / 10.0
+        val suffix = if (unit == WeightUnit.KG) "kg" else "lb"
+        return "${rounded} $suffix"
+    }
+
     val tier = profile.subscriptionTier
     val tierLabel = when (tier) {
         SubscriptionTier.FREE -> "Free"
@@ -77,6 +90,9 @@ fun ProfileScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                // Keep bottom actions (e.g. "View all items") above the system nav/gesture bar and keyboard.
+                .navigationBarsPadding()
+                .imePadding()
                 .padding(24.dp)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -223,13 +239,21 @@ fun ProfileScreen(
 
             val latestWeight = profile.weightHistory.maxByOrNull { it.date }?.weight
             Text(
-                text = "Latest weight: ${latestWeight?.toString() ?: "not logged"}",
+                text = "Latest weight: ${latestWeight?.let { formatWeight(it) } ?: "not logged"}",
                 style = MaterialTheme.typography.bodyMedium
             )
 
             // Weight goal inline edit (pencil)
             var editingGoal by remember { mutableStateOf(false) }
-            var goalText by remember(profile.weightGoal) { mutableStateOf(profile.weightGoal?.toString() ?: "") }
+            var goalText by remember(profile.weightGoal, profile.weightUnit) {
+                mutableStateOf(
+                    profile.weightGoal?.let { lb ->
+                        val v = fromLb(lb)
+                        val rounded = kotlin.math.round(v * 10.0) / 10.0
+                        rounded.toString()
+                    } ?: ""
+                )
+            }
 
             if (!editingGoal) {
                 Row(
@@ -238,7 +262,7 @@ fun ProfileScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Weight goal: ${profile.weightGoal?.toString() ?: "not set"}",
+                        text = "Weight goal: ${profile.weightGoal?.let { formatWeight(it) } ?: "not set"}",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     IconButton(onClick = { editingGoal = true }) {
@@ -258,7 +282,7 @@ fun ProfileScreen(
                         value = goalText,
                         onValueChange = { goalText = it },
                         modifier = Modifier.weight(1f),
-                        label = { Text("Weight goal") }
+                        label = { Text("Weight goal (${if (unit == WeightUnit.KG) "kg" else "lb"})") }
                     )
                     Button(
                         onClick = {
@@ -289,7 +313,7 @@ fun ProfileScreen(
                     value = weightText,
                     onValueChange = { weightText = it },
                     modifier = Modifier.weight(1f),
-                    label = { Text("Log current weight") }
+                    label = { Text("Log current weight (${if (unit == WeightUnit.KG) "kg" else "lb"})") }
                 )
                 Button(
                     onClick = {

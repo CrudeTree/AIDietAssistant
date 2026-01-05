@@ -2,7 +2,25 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    id("com.google.gms.google-services")
+}
+
+// Firebase / Google Services config is intentionally not checked into git (see .gitignore).
+// On a fresh machine, this file may be missing; don't fail the whole build in that case.
+val hasGoogleServicesJson = listOf(
+    file("google-services.json"),
+    file("src/main/google-services.json"),
+    file("src/debug/google-services.json"),
+    file("src/release/google-services.json")
+).any { it.exists() }
+
+if (hasGoogleServicesJson) {
+    apply(plugin = "com.google.gms.google-services")
+} else {
+    logger.warn(
+        "google-services.json not found; Firebase/Google services are disabled for this build. " +
+            "To enable Firebase, download google-services.json for applicationId 'com.myaidiet.app' " +
+            "from the Firebase console and place it in app/google-services.json (or app/src/debug/google-services.json)."
+    )
 }
 
 android {

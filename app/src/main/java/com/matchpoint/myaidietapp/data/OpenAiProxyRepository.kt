@@ -44,6 +44,8 @@ data class CheckInRequest(
     val mealPhotoUrl: String? = null,
     val mealGrams: Int? = null,
     val mealText: String? = null,
+    // Menu scan support (mode="menu_scan")
+    val menuPhotoUrl: String? = null,
     // Batch food name analysis (mode="analyze_food_batch")
     val foodNames: List<String>? = null
 )
@@ -268,5 +270,29 @@ class OpenAiProxyRepository(
         val raw = response.text
         analyzeMealAdapter.fromJson(raw)
             ?: throw IllegalStateException("Empty meal analysis response")
+    }
+
+    /**
+     * Menu scan: analyze a restaurant menu photo and recommend diet-compatible choices.
+     * Returns plain text to display directly.
+     */
+    suspend fun analyzeMenu(
+        menuPhotoUrl: String,
+        dietType: DietType,
+        inventorySummary: String?
+    ): String = withContext(Dispatchers.IO) {
+        service.checkIn(
+            CheckInRequest(
+                lastMeal = null,
+                hungerSummary = null,
+                weightTrend = null,
+                minutesSinceMeal = null,
+                mode = "menu_scan",
+                inventorySummary = inventorySummary,
+                dietType = dietType.name,
+                menuPhotoUrl = menuPhotoUrl,
+                userMessage = "Scan this restaurant menu photo and recommend the best choices for my diet."
+            )
+        ).text
     }
 }

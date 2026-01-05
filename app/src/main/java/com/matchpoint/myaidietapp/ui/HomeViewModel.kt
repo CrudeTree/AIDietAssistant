@@ -84,6 +84,29 @@ class HomeViewModel(
     private val notificationScheduler: NotificationScheduler? = null,
     private val quotaManager: com.matchpoint.myaidietapp.data.DailyQuotaManager? = null
 ) : ViewModel() {
+    private fun normalizeFoodNameKey(s: String?): String {
+        return (s ?: "")
+            .trim()
+            .lowercase()
+            .replace(Regex("\\s+"), " ")
+    }
+
+    private fun lbToKg(lb: Double): Double = lb / 2.2046226218
+    private fun kgToLb(kg: Double): Double = kg * 2.2046226218
+
+    private fun toPounds(value: Double, unit: WeightUnit): Double =
+        if (unit == WeightUnit.KG) kgToLb(value) else value
+
+    private fun fromPounds(valueLb: Double, unit: WeightUnit): Double =
+        if (unit == WeightUnit.KG) lbToKg(valueLb) else valueLb
+
+    private fun formatWeight(valueLb: Double, unit: WeightUnit): String {
+        val v = fromPounds(valueLb, unit)
+        val rounded = kotlin.math.round(v * 10.0) / 10.0
+        val suffix = if (unit == WeightUnit.KG) "kg" else "lb"
+        return "${rounded} $suffix"
+    }
+
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState
@@ -299,6 +322,7 @@ class HomeViewModel(
         weightGoal: Double?,
         dietType: DietType,
         startingWeight: Double?,
+        weightUnit: WeightUnit,
         fastingPreset: FastingPreset,
         eatingWindowStartMinutes: Int?
     ) {
@@ -310,9 +334,21 @@ class HomeViewModel(
                 val start = if (hours == null) null else eatingWindowStartMinutes
                 val end = if (hours == null || start == null) null else (start + hours * 60) % (24 * 60)
 
+                fun cleaned(x: Double?): Double? = x?.takeIf { it.isFinite() && it > 0.0 }
+                val rawStart = cleaned(startingWeight)
+                val rawGoal = cleaned(weightGoal)
+
+                // Only persist the user's unit choice if they actually entered a weight.
+                val unitToStore = if (rawStart != null || rawGoal != null) weightUnit else WeightUnit.LB
+
+                // Store weights in pounds internally.
+                val startLb = rawStart?.let { toPounds(it, unitToStore) }
+                val goalLb = rawGoal?.let { toPounds(it, unitToStore) }
+
                 val profile = UserProfile(
                     name = name,
-                    weightGoal = weightGoal,
+                    weightUnit = unitToStore,
+                    weightGoal = goalLb,
                     dietType = dietType,
                     subscriptionTier = SubscriptionTier.FREE,
                     fastingPreset = fastingPreset,
@@ -321,7 +357,7 @@ class HomeViewModel(
                     allowedFoods = emptyList(),
                     inventory = emptyMap(),
                     foodItems = emptyList(),
-                    weightHistory = startingWeight?.let {
+                    weightHistory = startLb?.let {
                         listOf(WeightEntry(date = todayDate, weight = it))
                     } ?: emptyList()
                 )
@@ -342,7 +378,7 @@ class HomeViewModel(
                 val welcomeMessage = MessageEntry(
                     id = UUID.randomUUID().toString(),
                     sender = MessageSender.AI,
-                    text = "AI Food Coach online. I’ll tell you when to eat – you just follow."
+                    text = "AI Diet Assistant online. Add foods to your list and I’ll help you manage your diet, generate recipes, and scan groceries/menus."
                 )
                 val introMessage = MessageEntry(
                     id = UUID.randomUUID().toString(),
@@ -379,10 +415,6 @@ class HomeViewModel(
                 val current = userRepo.getUserProfile() ?: return@launch
                 val diet = current.dietType
 
-                if (!checkFoodListLimitOrPrompt(current, addingCount = 1)) {
-                    return@launch
-                }
-
                 val analysisAttempt = runCatching {
                     if (productUrl != null) {
                         proxyRepo.analyzeFood(
@@ -406,7 +438,8 @@ class HomeViewModel(
 
                 if (analysis != null) {
                     val healthRating = analysis.rating
-                    val dietFitRating = analysis.dietFitRating ?: analysis.rating
+                    // Prefer per-diet rating so UI matches the user's selected diet.
+                    val dietFitRating = analysis.dietRatings[diet.name] ?: analysis.dietFitRating ?: analysis.rating
                     val dietRatings = analysis.dietRatings.toMutableMap().apply {
                         // Back-compat: if server didn't send multi-diet ratings,
                         // at least persist the current diet rating so future diet switches can be filled in.
@@ -437,11 +470,52 @@ class HomeViewModel(
                     messagesRepo.appendMessage(aiEntry)
 
                     if (analysis.accepted) {
+                        val cats = categories.map { it.trim().uppercase() }.distinct()
+                        val finalName = analysis.normalizedName.ifBlank { name }.trim()
+                        val key = normalizeFoodNameKey(finalName)
+
+                        // If user already has this item, don't add a duplicate row; increment quantity instead.
+                        val existingIdx = current.foodItems.indexOfFirst { fi ->
+                            normalizeFoodNameKey(fi.name) == key
+                        }
+                        if (existingIdx >= 0) {
+                            val existing = current.foodItems[existingIdx]
+                            val updatedItem = existing.copy(
+                                quantity = (existing.quantity + quantity).coerceAtLeast(1),
+                                // Merge categories so "Rice" can be Meal+Ingredient etc without duplicates.
+                                categories = (existing.categories + cats).map { it.trim().uppercase() }.distinct(),
+                                // Prefer to keep any existing photos; if this add has a photo and existing doesn't, keep it.
+                                photoUrl = existing.photoUrl ?: productUrl,
+                                labelUrl = existing.labelUrl ?: labelUrl,
+                                nutritionFactsUrl = existing.nutritionFactsUrl ?: nutritionFactsUrl
+                            )
+                            val updatedList = current.foodItems.toMutableList().also { it[existingIdx] = updatedItem }
+                            val updatedProfile = current.copy(foodItems = updatedList)
+                            userRepo.saveUserProfile(updatedProfile)
+                            messagesRepo.appendMessage(
+                                MessageEntry(
+                                    id = UUID.randomUUID().toString(),
+                                    sender = MessageSender.AI,
+                                    text = "Already had '${existing.name}'. Increased quantity to x${updatedItem.quantity}."
+                                )
+                            )
+                            _uiState.value = _uiState.value.copy(
+                                profile = updatedProfile,
+                                messages = messagesRepo.getMessageLog().log
+                            )
+                            return@launch
+                        }
+
+                        // Only new unique items should consume a slot.
+                        if (!checkFoodListLimitOrPrompt(current, addingCount = 1)) {
+                            return@launch
+                        }
+
                         val newItem = FoodItem(
                             id = UUID.randomUUID().toString(),
-                            name = analysis.normalizedName.ifBlank { name },
-                            quantity = quantity,
-                            categories = categories.map { it.uppercase() }.distinct(),
+                            name = finalName,
+                            quantity = quantity.coerceAtLeast(1),
+                            categories = cats,
                             photoUrl = productUrl,
                             labelUrl = labelUrl,
                             nutritionFactsUrl = nutritionFactsUrl,
@@ -506,11 +580,13 @@ class HomeViewModel(
                 val cleaned = names.map { it.trim() }.filter { it.isNotBlank() }
                 if (cleaned.isEmpty()) return@launch
 
-                val existingLower = current.foodItems.map { it.name.trim().lowercase() }.toSet()
+                val cats = categories.map { it.trim().uppercase() }.distinct()
+
+                // Deduplicate within the submission, but DO NOT filter out items already in the list yet—
+                // duplicates should increment quantity instead of being dropped on the floor.
                 val deduped = cleaned
                     .map { it.replace(Regex("\\s+"), " ").trim() }
-                    .distinctBy { it.lowercase() }
-                    .filter { it.lowercase() !in existingLower }
+                    .distinctBy { normalizeFoodNameKey(it) }
 
                 if (deduped.isEmpty()) {
                     messagesRepo.appendMessage(
@@ -521,10 +597,6 @@ class HomeViewModel(
                         )
                     )
                     _uiState.value = _uiState.value.copy(messages = messagesRepo.getMessageLog().log)
-                    return@launch
-                }
-
-                if (!checkFoodListLimitOrPrompt(current, addingCount = deduped.size)) {
                     return@launch
                 }
 
@@ -549,20 +621,37 @@ class HomeViewModel(
                     }
                 }
 
+                // Build a mutable working list so we can increment quantities for existing items.
+                val working = current.foodItems.toMutableList()
+                val indexByKey = working
+                    .mapIndexed { idx, fi -> normalizeFoodNameKey(fi.name) to idx }
+                    .toMap()
+                    .toMutableMap()
+
+                var updatedCount = 0
                 val newItems = mutableListOf<FoodItem>()
-                val cats = categories.map { it.uppercase() }.distinct()
-                val existingAfterLower = current.foodItems.map { it.name.trim().lowercase() }.toMutableSet()
 
                 analyses.forEach { analysis ->
                     if (!analysis.accepted) return@forEach
                     val normalized = analysis.normalizedName.ifBlank { "" }.trim()
                     val nameToUse = if (normalized.isNotBlank()) normalized else null
                     val finalName = nameToUse ?: return@forEach
-                    val key = finalName.lowercase()
-                    if (existingAfterLower.contains(key)) return@forEach
-                    existingAfterLower.add(key)
+                    val key = normalizeFoodNameKey(finalName)
 
-                    val dietFitRating = analysis.dietFitRating ?: analysis.rating
+                    val existingIdx = indexByKey[key]
+                    if (existingIdx != null) {
+                        val existing = working[existingIdx]
+                        val updated = existing.copy(
+                            quantity = (existing.quantity + 1).coerceAtLeast(1),
+                            categories = (existing.categories + cats).map { it.trim().uppercase() }.distinct()
+                        )
+                        working[existingIdx] = updated
+                        updatedCount += 1
+                        return@forEach
+                    }
+
+                    // Prefer per-diet rating so UI matches the user's selected diet.
+                    val dietFitRating = analysis.dietRatings[diet.name] ?: analysis.dietFitRating ?: analysis.rating
                     val dietRatings = analysis.dietRatings.toMutableMap().apply {
                         putIfAbsent(diet.name, dietFitRating)
                     }.toMap()
@@ -585,9 +674,11 @@ class HomeViewModel(
                             allergyRatings = analysis.allergyRatings
                         )
                     )
+                    // Track new keys so later analyses in the same batch increment instead of duplicating.
+                    indexByKey[key] = -1 // placeholder, will be resolved after we append
                 }
 
-                if (newItems.isEmpty()) {
+                if (newItems.isEmpty() && updatedCount == 0) {
                     messagesRepo.appendMessage(
                         MessageEntry(
                             id = UUID.randomUUID().toString(),
@@ -599,19 +690,41 @@ class HomeViewModel(
                     return@launch
                 }
 
-                val updated = current.copy(foodItems = current.foodItems + newItems)
-                userRepo.saveUserProfile(updated)
+                // Only NEW unique items consume slots.
+                val newUniqueCount = newItems.size
+                if (newUniqueCount > 0 && !checkFoodListLimitOrPrompt(current, addingCount = newUniqueCount)) {
+                    return@launch
+                }
+
+                // Append new items and fix placeholder indexes.
+                val startIdx = working.size
+                working.addAll(newItems)
+                // Replace placeholder -1 with actual indices for completeness (not strictly needed afterwards).
+                for (i in 0 until newItems.size) {
+                    val k = normalizeFoodNameKey(newItems[i].name)
+                    indexByKey[k] = startIdx + i
+                }
+
+                val updatedProfile = current.copy(foodItems = working)
+                userRepo.saveUserProfile(updatedProfile)
 
                 messagesRepo.appendMessage(
                     MessageEntry(
                         id = UUID.randomUUID().toString(),
                         sender = MessageSender.AI,
-                        text = "Added ${newItems.size} item(s) to your list."
+                        text = when {
+                            newItems.isNotEmpty() && updatedCount > 0 ->
+                                "Added ${newItems.size} new item(s) and updated $updatedCount existing item(s)."
+                            newItems.isNotEmpty() ->
+                                "Added ${newItems.size} item(s) to your list."
+                            else ->
+                                "Updated $updatedCount existing item(s)."
+                        }
                     )
                 )
 
                 _uiState.value = _uiState.value.copy(
-                    profile = updated,
+                    profile = updatedProfile,
                     messages = messagesRepo.getMessageLog().log
                 )
             } catch (e: Exception) {
@@ -630,9 +743,9 @@ class HomeViewModel(
     private fun introText(profile: UserProfile): String {
         val foods = profile.foodItems.takeIf { it.isNotEmpty() } ?: emptyList()
         val names = foods.take(3).joinToString { it.name }
-        val foodLine = if (names.isNotEmpty()) "I see you have $names on deck." else "I’ll work with what you logged."
-        val goalLine = profile.weightGoal?.let { " Goal noted: $it." } ?: ""
-        return "Hey ${profile.name.ifBlank { "there" }}. $foodLine$goalLine Ready to let me drive?"
+        val foodLine = if (names.isNotEmpty()) "I see you have $names on your list." else "Start by adding a few foods to your list."
+        val goalLine = profile.weightGoal?.takeIf { it > 0.0 }?.let { " Goal noted: ${formatWeight(it, profile.weightUnit)}." } ?: ""
+        return "Hey ${profile.name.ifBlank { "there" }}. $foodLine$goalLine Want a recipe idea, a grocery opinion, or a menu recommendation?"
     }
 
     private fun estimateWeightTrend(weights: List<WeightEntry>): Double {
@@ -760,8 +873,11 @@ class HomeViewModel(
     fun updateWeightGoal(weightGoal: Double?) {
         viewModelScope.launch {
             try {
-                userRepo.updateWeightGoal(weightGoal)
-                val updated = userRepo.getUserProfile()
+                val profile = userRepo.getUserProfile() ?: return@launch
+                val cleaned = weightGoal?.takeIf { it.isFinite() && it > 0.0 }
+                val goalLb = cleaned?.let { toPounds(it, profile.weightUnit) }
+                userRepo.updateWeightGoal(goalLb)
+                val updated = profile.copy(weightGoal = goalLb)
                 _uiState.value = _uiState.value.copy(profile = updated)
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(error = e.message)
@@ -811,12 +927,28 @@ class HomeViewModel(
     fun logCurrentWeight(weight: Double) {
         viewModelScope.launch {
             try {
+                val profile = userRepo.getUserProfile() ?: return@launch
+                val cleaned = weight.takeIf { it.isFinite() && it > 0.0 } ?: return@launch
+                val weightLb = toPounds(cleaned, profile.weightUnit)
                 val today = LocalDate.now(zoneId).toString()
-                userRepo.appendWeightEntry(WeightEntry(date = today, weight = weight))
+                userRepo.appendWeightEntry(WeightEntry(date = today, weight = weightLb))
                 val updated = userRepo.getUserProfile()
                 _uiState.value = _uiState.value.copy(profile = updated)
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(error = e.message)
+            }
+        }
+    }
+
+    fun updateWeightUnit(weightUnit: WeightUnit) {
+        viewModelScope.launch {
+            try {
+                val profile = userRepo.getUserProfile() ?: return@launch
+                userRepo.updateWeightUnit(weightUnit)
+                val updated = profile.copy(weightUnit = weightUnit)
+                _uiState.value = _uiState.value.copy(profile = updated)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message ?: "Failed to update weight unit.")
             }
         }
     }
@@ -1065,6 +1197,11 @@ class HomeViewModel(
         return storageRepo.uploadToPath(uri, path)
     }
 
+    suspend fun uploadMenuPhoto(scanId: String, uri: android.net.Uri): String {
+        val path = "menuPhotos/$userId/$scanId/menu.jpg"
+        return storageRepo.uploadToPath(uri, path)
+    }
+
     fun evaluateGroceryScan(productUrl: String, labelUrl: String?, nutritionFactsUrl: String?) {
         viewModelScope.launch {
             try {
@@ -1154,6 +1291,42 @@ class HomeViewModel(
                         item = item
                     )
                 )
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message)
+            } finally {
+                _uiState.value = _uiState.value.copy(isProcessing = false)
+            }
+        }
+    }
+
+    fun evaluateMenuScan(menuPhotoUrl: String) {
+        viewModelScope.launch {
+            try {
+                _uiState.value = _uiState.value.copy(isProcessing = true)
+                val profile = userRepo.getUserProfile() ?: return@launch
+                val inventorySummary = buildInventorySummary(profile)
+
+                val text = runCatching {
+                    proxyRepo.analyzeMenu(
+                        menuPhotoUrl = menuPhotoUrl,
+                        dietType = profile.dietType,
+                        inventorySummary = inventorySummary
+                    )
+                }.getOrElse { e ->
+                    when (e) {
+                        is HttpException -> "No service: ${describeProxyHttpError(e)}"
+                        else -> "No service. Check internet connectivity. (${e.javaClass.simpleName})"
+                    }
+                }
+
+                messagesRepo.appendMessage(
+                    MessageEntry(
+                        id = UUID.randomUUID().toString(),
+                        sender = MessageSender.AI,
+                        text = "Menu scan:\n$text"
+                    )
+                )
+                _uiState.value = _uiState.value.copy(messages = messagesRepo.getMessageLog().log)
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(error = e.message)
             } finally {
