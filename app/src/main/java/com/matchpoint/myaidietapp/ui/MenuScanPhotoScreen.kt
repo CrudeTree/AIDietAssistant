@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,10 +38,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import com.matchpoint.myaidietapp.R
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -109,11 +112,17 @@ fun MenuScanPhotoScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = "Menu scan",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold
-            )
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Image(
+                    painter = painterResource(id = R.drawable.header_menu_scan),
+                    contentDescription = "Menu scan",
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        // ~3x bigger header
+                        .height(210.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
             Text(
                 text = "Take a photo of the menu. I’ll read it and recommend the best options for your diet.",
                 style = MaterialTheme.typography.bodySmall,

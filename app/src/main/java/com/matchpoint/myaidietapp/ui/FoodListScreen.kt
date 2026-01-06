@@ -2,11 +2,13 @@ package com.matchpoint.myaidietapp.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.combinedClickable
@@ -38,6 +40,8 @@ import androidx.compose.ui.unit.sp
 import com.matchpoint.myaidietapp.model.DietType
 import com.matchpoint.myaidietapp.model.FoodItem
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.layout.ContentScale
+import com.matchpoint.myaidietapp.R
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -68,27 +72,44 @@ fun FoodListScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                val pageTitle = when (filterCategory?.trim()?.uppercase()) {
-                    "MEAL" -> "Meals"
-                    "INGREDIENT" -> "Ingredients"
-                    "SNACK" -> "Snacks"
-                    else -> "All items"
+            val headerResId: Int? = when (filterCategory?.trim()?.uppercase()) {
+                "MEAL" -> R.drawable.header_meals
+                "INGREDIENT" -> R.drawable.header_ingredients
+                "SNACK" -> R.drawable.header_snacks
+                else -> R.drawable.header_all_items
+            }
+            val pageTitle = when (filterCategory?.trim()?.uppercase()) {
+                "MEAL" -> "Meals"
+                "INGREDIENT" -> "Ingredients"
+                "SNACK" -> "Snacks"
+                else -> "All items"
+            }
+            Box(modifier = Modifier.fillMaxWidth()) {
+                if (headerResId != null) {
+                    Image(
+                        painter = painterResource(id = headerResId),
+                        contentDescription = pageTitle,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            // ~3x bigger header
+                            .height(210.dp),
+                        contentScale = ContentScale.Fit
+                    )
+                } else {
+                    Text(
+                        text = pageTitle,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.align(Alignment.CenterStart)
+                    )
                 }
-                Text(
-                    text = pageTitle,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
+
                 IconButton(
                     onClick = {
                         // On category pages, show Text/Photos choice; on "All items", go to Add Food hub.
                         if (filterCategory.isNullOrBlank()) onOpenAddFoodHub() else showAddChooser = true
-                    }
+                    },
+                    modifier = Modifier.align(Alignment.CenterEnd)
                 ) {
                     Icon(imageVector = Icons.Filled.Add, contentDescription = "Add")
                 }

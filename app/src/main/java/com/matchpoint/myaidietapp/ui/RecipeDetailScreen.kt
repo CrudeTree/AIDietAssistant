@@ -97,7 +97,8 @@ fun RecipeDetailScreen(
                         modifier = Modifier.size(26.dp)
                     )
                 }
-                IngredientIconFlow(items = have, iconSize = (fontSp * 4.0f).coerceIn(48f, 144f).dp)
+                val base = (fontSp * 4.0f).coerceIn(48f, 144f)
+                IngredientIconFlow(items = have, iconSize = (base * 0.8f).dp)
             }
 
             if (showIcons && missing.isNotEmpty()) {
@@ -113,7 +114,8 @@ fun RecipeDetailScreen(
                         modifier = Modifier.size(26.dp)
                     )
                 }
-                IngredientIconFlow(items = missing, iconSize = (fontSp * 4.0f).coerceIn(48f, 144f).dp)
+                val base = (fontSp * 4.0f).coerceIn(48f, 144f)
+                IngredientIconFlow(items = missing, iconSize = (base * 0.8f).dp)
             }
 
             Spacer(modifier = Modifier.height(4.dp))
@@ -122,7 +124,7 @@ fun RecipeDetailScreen(
                 RecipeTextWithIngredientIcons(
                     text = recipe.text,
                     ingredients = recipe.ingredients,
-                    iconSize = ((fontSp + 4f) * 2f).sp,
+                    iconSize = (((fontSp + 4f) * 2f) * 0.8f).sp,
                     textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = fontSp.sp, lineHeight = (fontSp * 1.35f).sp),
                     includeAllIconMatchesInText = true
                 )

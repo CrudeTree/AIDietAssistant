@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -27,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -38,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -58,6 +61,7 @@ fun SettingsScreen(
     onToggleShowFoodIcons: (Boolean) -> Unit,
     onSetFontSizeSp: (Float) -> Unit,
     onUpdateWeightUnit: (WeightUnit) -> Unit,
+    onUpdateWeightGoal: (Double?) -> Unit,
     onDietChange: (DietType) -> Unit,
     onUpdateFastingPreset: (FastingPreset) -> Unit,
     onUpdateEatingWindowStart: (Int) -> Unit,
@@ -82,6 +86,20 @@ fun SettingsScreen(
     var dietExpanded by remember { mutableStateOf(false) }
     var fastExpanded by remember { mutableStateOf(false) }
     var startExpanded by remember { mutableStateOf(false) }
+
+    val unit = profile.weightUnit
+    fun lbToKg(lb: Double): Double = lb / 2.2046226218
+    fun fromLb(lb: Double): Double = if (unit == WeightUnit.KG) lbToKg(lb) else lb
+
+    var goalText by remember(profile.weightGoal, profile.weightUnit) {
+        mutableStateOf(
+            profile.weightGoal?.let { lb ->
+                val v = fromLb(lb)
+                val rounded = kotlin.math.round(v * 10.0) / 10.0
+                rounded.toString()
+            } ?: ""
+        )
+    }
 
     if (deleteDialog) {
         AlertDialog(
@@ -142,17 +160,20 @@ fun SettingsScreen(
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onBack) {
+            Box(modifier = Modifier.fillMaxWidth()) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier.align(Alignment.CenterStart)
+                ) {
                     Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back")
                 }
-                Text(
-                    text = "Settings",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold
+                Image(
+                    painter = painterResource(id = com.matchpoint.myaidietapp.R.drawable.settings),
+                    contentDescription = "Settings",
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .height(210.dp),
+                    contentScale = ContentScale.Fit
                 )
             }
 
@@ -246,6 +267,42 @@ fun SettingsScreen(
                         Button(onClick = { onUpdateWeightUnit(WeightUnit.KG) }, enabled = !isProcessing) { Text("kg") }
                     }
                 }
+            }
+
+            // --- Weight goal ---
+            Text(
+                text = "Weight goal",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = goalText,
+                    onValueChange = { goalText = it.filter { ch -> ch.isDigit() || ch == '.' }.take(6) },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("Goal (${if (unit == WeightUnit.KG) "kg" else "lb"})") },
+                    singleLine = true,
+                    enabled = !isProcessing
+                )
+                Button(
+                    onClick = { onUpdateWeightGoal(goalText.toDoubleOrNull()) },
+                    enabled = !isProcessing
+                ) {
+                    Text("Save")
+                }
+            }
+            TextButton(
+                onClick = {
+                    goalText = ""
+                    onUpdateWeightGoal(null)
+                },
+                enabled = !isProcessing
+            ) {
+                Text("Clear goal")
             }
 
             // --- Diet & fasting ---
@@ -418,16 +475,26 @@ fun SettingsScreen(
                 fontWeight = FontWeight.SemiBold
             )
 
-            Button(
+            // Delete account (image only, no red container)
+            TextButton(
                 onClick = {
                     deletePassword = ""
                     deleteDialog = true
                 },
                 enabled = !isProcessing,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB00020))
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // Overlap upward a bit (assets have transparent padding)
+                    .offset(y = (-40).dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
             ) {
-                Text("Delete account")
+                Image(
+                    painter = painterResource(id = com.matchpoint.myaidietapp.R.drawable.btn_del_account),
+                    contentDescription = "Delete account",
+                    // ~2x bigger
+                    // ~40% smaller than 280dp
+                    modifier = Modifier.size(168.dp)
+                )
             }
         }
     }

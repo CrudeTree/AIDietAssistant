@@ -10,6 +10,7 @@
 /.idea/codeStyles/
 /.idea/.name
 .idea/deploymentTargetSelector.xml
+.idea/misc.xml
 .idea/deviceManager.xml
 .kotlin/
 .DS_Store
@@ -28,3 +29,6 @@ local.properties
 
 # Firebase config (keep private)
 **/google-services.json
+
+# Local asset-processing scratch space (do not commit)
+tools/_*/

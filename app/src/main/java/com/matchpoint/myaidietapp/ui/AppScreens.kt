@@ -16,7 +16,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,13 +26,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.Image
+import androidx.compose.ui.draw.rotate
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -52,20 +58,31 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.draw.alpha
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.matchpoint.myaidietapp.data.AuthRepository
 import com.matchpoint.myaidietapp.model.MessageSender
 import com.matchpoint.myaidietapp.model.FoodItem
 import com.matchpoint.myaidietapp.model.DietType
 import com.matchpoint.myaidietapp.model.WeightUnit
+import com.matchpoint.myaidietapp.R
 import android.content.Context
 import java.io.File
 import android.net.Uri
@@ -84,6 +101,7 @@ private enum class Screen {
     PROFILE,
     SETTINGS,
     FOOD_LIST,
+    RECIPES,
     ADD_ENTRY,
     TEXT_FOOD_ENTRY,
     PHOTO_CAPTURE,
@@ -407,6 +425,7 @@ fun DigitalStomachApp() {
                     foodListFilter = filter
                     navigate(Screen.FOOD_LIST)
                 },
+                onOpenRecipeList = { navigate(Screen.RECIPES) },
                 onSignOut = { vm.signOut() },
                 onOpenChoosePlan = {
                     pendingPlanNotice = null
@@ -428,10 +447,19 @@ fun DigitalStomachApp() {
                 onToggleShowFoodIcons = { show -> vm.updateShowFoodIcons(show) },
                 onSetFontSizeSp = { sp -> vm.updateUiFontSizeSp(sp) },
                 onUpdateWeightUnit = { unit -> vm.updateWeightUnit(unit) },
+                onUpdateWeightGoal = { goal -> vm.updateWeightGoal(goal) },
                 onDietChange = { vm.updateDiet(it) },
                 onUpdateFastingPreset = { vm.updateFastingPreset(it) },
                 onUpdateEatingWindowStart = { vm.updateEatingWindowStart(it) },
                 onDeleteAccount = { password -> vm.deleteAccount(password) }
+            )
+            screen == Screen.RECIPES -> RecipesScreen(
+                recipes = state.savedRecipes,
+                onBack = { popOrHome() },
+                onOpenRecipe = { recipe ->
+                    openRecipeId = recipe.id
+                    navigate(Screen.RECIPE_DETAIL)
+                }
             )
             screen == Screen.RECIPE_DETAIL && state.profile != null -> run {
                 val recipe = openRecipeId?.let { id -> state.savedRecipes.firstOrNull { it.id == id } }
@@ -798,84 +826,217 @@ fun HomeScreen(
     val nowMillis = System.currentTimeMillis()
     val mealDue = state.profile?.nextMealAtMillis?.let { nowMillis >= it } == true
     val fontSp = state.profile?.uiFontSizeSp?.coerceIn(12f, 40f) ?: 18f
+    val vineHeight = 140.dp
+    val density = LocalDensity.current
+    var chatTopPx by remember { mutableStateOf(0) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp)
-            .navigationBarsPadding()
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Title art as a background overlay (doesn't take layout space).
+        // Draw it inside a short, clipped top band so it *looks* anchored to the top,
+        // while hiding the PNG's extra transparent padding.
+        val titleBandHeight = 200.dp
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .height(titleBandHeight)
+                .clipToBounds()
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "AI Food Coach",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            Spacer(modifier = Modifier.width(12.dp))
-            FilledIconButton(
-                onClick = onOpenProfile,
-                modifier = Modifier.size(44.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Person,
-                    contentDescription = "Profile"
-                )
-            }
+            Image(
+                painter = painterResource(id = R.drawable.aidietassistanttext),
+                contentDescription = "AI Diet Assistant",
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    // Keep it very large (~3x) but shift up so the visible text sits at the top.
+                    // Now ~2x bigger than before, and slightly lower.
+                    // ~50% larger than 1800dp
+                    .height(2700.dp)
+                    // Pull up a bit to reduce empty space above the visible art.
+                    .offset(y = (-60).dp)
+                    .alpha(0.92f),
+                contentScale = ContentScale.Fit
+            )
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        // Cute background wallpaper (subtle, behind everything)
+        // Keep low alpha so it doesn't fight with readability.
+        Image(
+            painter = painterResource(id = R.drawable.tomato),
+            contentDescription = null,
+            modifier = Modifier
+                .size(160.dp)
+                .offset(x = (-36).dp, y = 90.dp)
+                .rotate(-18f),
+            alpha = 0.16f
+        )
+        Image(
+            painter = painterResource(id = R.drawable.blueberries),
+            contentDescription = null,
+            modifier = Modifier
+                .size(150.dp)
+                .offset(x = 220.dp, y = 220.dp)
+                .rotate(14f),
+            alpha = 0.14f
+        )
+        Image(
+            painter = painterResource(id = R.drawable.ic_food_peas),
+            contentDescription = null,
+            modifier = Modifier
+                .size(170.dp)
+                .offset(x = 205.dp, y = 560.dp)
+                .rotate(-12f),
+            alpha = 0.12f
+        )
+        // Keep bayleaf away from peas (both green).
+        Image(
+            painter = painterResource(id = R.drawable.bayleaf),
+            contentDescription = null,
+            modifier = Modifier
+                .size(170.dp)
+                .offset(x = (-24).dp, y = 520.dp)
+                .rotate(16f),
+            alpha = 0.10f
+        )
 
-        OutlinedButton(
+        // Profile button (overlay, doesn't take layout space)
+        IconButton(
+            onClick = onOpenProfile,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(top = 8.dp, end = 8.dp)
+                .zIndex(1000f)
+                // Ensure the icon button itself is large (otherwise the Image gets constrained).
+                .size(68.dp)
+        ) {
+            Image(
+                painter = painterResource(id = R.drawable.carrot),
+                contentDescription = "Profile",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .padding(horizontal = 16.dp)
+                .navigationBarsPadding()
+        ) {
+        // Spacer to position the button stack under the background title art.
+        // Increase slightly so there's more separation below the header.
+        Spacer(modifier = Modifier.height(84.dp))
+
+        // "Pyramid" actions: use TextButton (no bubble/border), wrap to content, centered.
+        TextButton(
             onClick = onOpenAddEntry,
-            modifier = Modifier.align(Alignment.CenterHorizontally)
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
         ) {
-            Text("+ Meal, Snack, Ingredient")
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("+ Meal, Snack, Ingredient")
+                Image(
+                    painter = painterResource(id = R.drawable.forkknife),
+                    contentDescription = null,
+                    modifier = Modifier.size(44.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
-        OutlinedButton(
+        TextButton(
             onClick = onOpenGroceryScan,
-            modifier = Modifier.align(Alignment.CenterHorizontally)
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
         ) {
-            Text("Grocery Shopping Scan")
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Grocery Shopping Scan")
+                Image(
+                    painter = painterResource(id = R.drawable.grocery),
+                    contentDescription = null,
+                    modifier = Modifier.size(44.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
-        OutlinedButton(
+        TextButton(
             onClick = onGenerateMeal,
-            modifier = Modifier.align(Alignment.CenterHorizontally)
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
         ) {
-            Text("Generate Meal")
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Generate Meal")
+                Image(
+                    painter = painterResource(id = R.drawable.salad),
+                    contentDescription = null,
+                    modifier = Modifier.size(53.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
-        OutlinedButton(
+        TextButton(
             onClick = onOpenMenuScan,
-            modifier = Modifier.align(Alignment.CenterHorizontally)
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
         ) {
-            Text("Menu Scan")
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Menu Scan")
+                Image(
+                    painter = painterResource(id = R.drawable.menu),
+                    contentDescription = null,
+                    modifier = Modifier.size(44.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
         }
 
         // Food list removed from AI Food Coach page (Home).
         // Access via Profile -> "View foods list".
 
+        Spacer(modifier = Modifier.height(50.dp))
+
         // Chat history
-        LazyColumn(
+        Box(
             modifier = Modifier
                 .weight(1f)
-                .fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            reverseLayout = true
+                .fillMaxWidth()
+                .onGloballyPositioned { coords ->
+                    chatTopPx = coords.positionInRoot().y.toInt()
+                }
         ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                reverseLayout = true,
+                // Ensure older messages (top) aren't hidden under the vine overlay.
+                contentPadding = PaddingValues(top = vineHeight)
+            ) {
             // Grocery scan actions (shown inline under the most recent message)
             state.pendingGrocery?.let { _ ->
                 item {
@@ -924,14 +1085,32 @@ fun HomeScreen(
                         horizontalArrangement = if (isAi) Arrangement.Start else Arrangement.End
                     ) {
                         val annotated = MarkdownLite.toAnnotatedString(msg.text)
-                        val bubbleColor = if (isAi) Color(0xFFE6F4EA) else Color(0xFFEDE7F6)
-                        val bubbleTextColor = Color(0xFF1B1B1B)
+                        val bubbleColor = if (isAi) Color(0xFF0BEE3F) else Color(0xFFBD1CDD)
+                        // Subtle fade across the bubble (gradient).
+                        val bubbleBrush = if (isAi) {
+                            // More noticeable fade (strong -> much lighter)
+                            Brush.horizontalGradient(
+                                colors = listOf(
+                                    Color(0xFF0BEE3F),
+                                    Color(0x590BEE3F) // ~35% alpha
+                                )
+                            )
+                        } else {
+                            // Reverse direction for user bubbles
+                            Brush.horizontalGradient(
+                                colors = listOf(
+                                    Color(0x59BD1CDD), // ~35% alpha
+                                    Color(0xFFBD1CDD)
+                                )
+                            )
+                        }
+                        val bubbleTextColor = if (isAi) Color(0xFF111111) else Color(0xFFFFFFFF)
                         Text(
                             text = annotated,
                             modifier = Modifier
                                 .fillMaxWidth(0.84f)
                                 .clip(RoundedCornerShape(16.dp))
-                                .background(bubbleColor)
+                                .background(bubbleBrush)
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
                             color = bubbleTextColor,
                             style = MaterialTheme.typography.bodyMedium.copy(
@@ -942,7 +1121,6 @@ fun HomeScreen(
                     }
 
                     if (isRecipe) {
-                        Spacer(modifier = Modifier.height(6.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = if (isAi) Arrangement.Start else Arrangement.End
@@ -954,14 +1132,27 @@ fun HomeScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             } else {
-                                OutlinedButton(onClick = { onSaveRecipe(msg.id) }) {
-                                    Text("Save recipe")
+                                IconButton(
+                                    onClick = { onSaveRecipe(msg.id) },
+                                    // Make the tap target match the intended large icon size (~5x).
+                                    // ~30% smaller
+                                    // ~20% smaller than 168dp
+                                    modifier = Modifier.size(134.dp)
+                                ) {
+                                    Image(
+                                        painter = painterResource(id = R.drawable.btn_save),
+                                        contentDescription = "Save recipe",
+                                        // Big save icon (asset has transparent padding)
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Fit
+                                    )
                                 }
                             }
                         }
                     }
                 }
             }
+        }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -994,6 +1185,30 @@ fun HomeScreen(
                 }
             )
         )
+        }
+
+        // Vine overlay: full-width, above everything, positioned to sit right on top of the chat box.
+        if (chatTopPx > 0) {
+            val vineScaleX = 1.2f
+            val vineScaleY = 4f // ~2x more than the previous 1.18f
+            val liftPx = with(density) { 16.dp.toPx() }.toInt()
+            // Nudge down by ~0.75x the button icon height (icons are ~44dp).
+            val downPx = with(density) { 90.dp.toPx() }.toInt()
+            Image(
+                painter = painterResource(id = R.drawable.vine),
+                contentDescription = null,
+                modifier = Modifier
+                    .zIndex(999f)
+                    .fillMaxWidth()
+                    .height(vineHeight)
+                    // Anchor near the chat's top edge so it "rests" on the chat box.
+                    .offset { IntOffset(x = 0, y = chatTopPx - liftPx + downPx) }
+                    // Stretch a bit more left/right AND top/bottom visually
+                    .graphicsLayer(scaleX = vineScaleX, scaleY = vineScaleY),
+                contentScale = ContentScale.FillBounds,
+                alpha = 0.75f
+            )
+        }
     }
 }
 
@@ -1091,18 +1306,17 @@ private fun EatingWindowBar(profile: com.matchpoint.myaidietapp.model.UserProfil
     val f1 = len1.toFloat() / horizon.toFloat()
     val f2 = len2.toFloat() / horizon.toFloat()
 
-    // Darker blue + more vivid orange
-    val blueText = Color(0xFF0D47A1)
-    val blueFill = Color(0xFF90CAF9)
-    val orangeText = Color(0xFFFF6F00)
-    val orangeFill = Color(0xFFFFCC80)
+    // Fasting window display colors (high contrast).
+    // Blue: #0000FF, Orange: #F04A00
+    val blueFill = Color(0xFF0000FF)
+    val orangeFill = Color(0xFFF04A00)
+    val barTextColor = Color.White
 
     val state0Inside = insideNow
     val state1Inside = !state0Inside
     val state2Inside = state0Inside
 
     fun fillFor(isInside: Boolean) = if (isInside) orangeFill else blueFill
-    fun textColorFor(isInside: Boolean) = if (isInside) orangeText else blueText
     fun labelFor(isInside: Boolean) = if (isInside) "Eating Window" else "Don’t Eat"
 
     val countdownText = if (!hasWindow) "No fasting window"
@@ -1149,7 +1363,7 @@ private fun EatingWindowBar(profile: com.matchpoint.myaidietapp.model.UserProfil
         // Embedded countdown label (TextField-style).
         Text(
             text = countdownText,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = barTextColor,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier
                 .align(Alignment.TopStart)
@@ -1175,7 +1389,7 @@ private fun EatingWindowBar(profile: com.matchpoint.myaidietapp.model.UserProfil
                     ) {
                         Text(
                             text = labelFor(state0Inside),
-                            color = textColorFor(state0Inside),
+                            color = barTextColor,
                             style = MaterialTheme.typography.bodySmall,
                             maxLines = 1,
                             softWrap = false,
@@ -1192,7 +1406,7 @@ private fun EatingWindowBar(profile: com.matchpoint.myaidietapp.model.UserProfil
                     ) {
                         Text(
                             text = labelFor(state1Inside),
-                            color = textColorFor(state1Inside),
+                            color = barTextColor,
                             style = MaterialTheme.typography.bodySmall,
                             maxLines = 1,
                             softWrap = false,
@@ -1209,7 +1423,7 @@ private fun EatingWindowBar(profile: com.matchpoint.myaidietapp.model.UserProfil
                     ) {
                         Text(
                             text = labelFor(state2Inside),
-                            color = textColorFor(state2Inside),
+                            color = barTextColor,
                             style = MaterialTheme.typography.bodySmall,
                             maxLines = 1,
                             softWrap = false,

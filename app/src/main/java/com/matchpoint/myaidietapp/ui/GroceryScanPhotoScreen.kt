@@ -6,6 +6,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,6 +16,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -37,10 +40,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import com.matchpoint.myaidietapp.R
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -147,14 +152,23 @@ fun GroceryScanPhotoScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(16.dp)
+                // Keep the bottom submit button above the system nav bar and keyboard.
+                .navigationBarsPadding()
+                .imePadding()
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = "Grocery scan",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold
-            )
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Image(
+                    painter = painterResource(id = R.drawable.header_grocery_scan),
+                    contentDescription = "Grocery scan",
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        // ~3x bigger header
+                        .height(210.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
             Text(
                 text = "Take the front photo (required). Ingredients and nutrition facts are optional. After evaluation you can Add or Leave.",
                 style = MaterialTheme.typography.bodySmall,
