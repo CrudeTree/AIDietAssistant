@@ -59,13 +59,15 @@ fun SettingsScreen(
     errorText: String?,
     onBack: () -> Unit,
     onToggleShowFoodIcons: (Boolean) -> Unit,
+    onToggleShowWallpaperFoodIcons: (Boolean) -> Unit,
     onSetFontSizeSp: (Float) -> Unit,
     onUpdateWeightUnit: (WeightUnit) -> Unit,
     onUpdateWeightGoal: (Double?) -> Unit,
     onDietChange: (DietType) -> Unit,
     onUpdateFastingPreset: (FastingPreset) -> Unit,
     onUpdateEatingWindowStart: (Int) -> Unit,
-    onDeleteAccount: (String) -> Unit
+    onDeleteAccount: (String) -> Unit,
+    wallpaperSeed: Int
 ) {
     val ctx = LocalContext.current
     val tomatoId = remember {
@@ -153,13 +155,18 @@ fun SettingsScreen(
     }
 
     Surface {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (profile.showWallpaperFoodIcons) {
+                RandomFoodWallpaper(seed = wallpaperSeed, count = 24, baseAlpha = 0.08f)
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
             Box(modifier = Modifier.fillMaxWidth()) {
                 IconButton(
                     onClick = onBack,
@@ -201,7 +208,7 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text(text = "Show food icons", style = MaterialTheme.typography.bodyMedium)
+                    Text(text = "Show food icons in recipe", style = MaterialTheme.typography.bodyMedium)
                     if (profile.showFoodIcons && tomatoId != null) {
                         Image(
                             painter = painterResource(id = tomatoId),
@@ -218,6 +225,19 @@ fun SettingsScreen(
             }
 
             Spacer(modifier = Modifier.height(6.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "Show wallpaper food icons", style = MaterialTheme.typography.bodyMedium)
+                Switch(
+                    checked = profile.showWallpaperFoodIcons,
+                    onCheckedChange = { onToggleShowWallpaperFoodIcons(it) },
+                    enabled = !isProcessing
+                )
+            }
 
             // --- Font size slider with live preview ---
             Text(
@@ -294,15 +314,6 @@ fun SettingsScreen(
                 ) {
                     Text("Save")
                 }
-            }
-            TextButton(
-                onClick = {
-                    goalText = ""
-                    onUpdateWeightGoal(null)
-                },
-                enabled = !isProcessing
-            ) {
-                Text("Clear goal")
             }
 
             // --- Diet & fasting ---
@@ -495,6 +506,7 @@ fun SettingsScreen(
                     // ~40% smaller than 280dp
                     modifier = Modifier.size(168.dp)
                 )
+            }
             }
         }
     }

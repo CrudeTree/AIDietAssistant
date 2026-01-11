@@ -2,6 +2,7 @@ package com.matchpoint.myaidietapp.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -25,6 +27,8 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,9 +37,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.painterResource
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import com.matchpoint.myaidietapp.R
 import com.matchpoint.myaidietapp.model.SubscriptionTier
 
@@ -56,7 +64,7 @@ fun ChoosePlanScreen(
         SubscriptionTier.REGULAR -> 1
         SubscriptionTier.PRO -> 2
     }
-    val isUpgrade = tierRank(selectedTier) > tierRank(currentTier)
+    val isDowngrade = tierRank(selectedTier) < tierRank(currentTier)
 
     fun isSamePlan(tier: SubscriptionTier, selectedCycle: BillingCycle): Boolean {
         if (tier != currentTier) return false
@@ -68,6 +76,9 @@ fun ChoosePlanScreen(
     }
 
     val canProceed = !isSamePlan(selectedTier, cycle)
+    val isPaid = selectedTier != SubscriptionTier.FREE
+    // If not a downgrade, allow in-app purchase flow for upgrades AND billing-cycle changes.
+    val shouldPurchaseInApp = canProceed && isPaid && !isDowngrade
 
     val basicPrice = if (cycle == BillingCycle.YEARLY) "$99.99/year" else "$9.99/month"
     val premiumPrice = if (cycle == BillingCycle.YEARLY) "$199.99/year" else "$19.99/month"
@@ -76,14 +87,27 @@ fun ChoosePlanScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = "Choose your plan",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
-            )
+            Box(modifier = Modifier.fillMaxWidth()) {
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier.align(Alignment.CenterStart)
+                ) {
+                    Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back")
+                }
+                Image(
+                    painter = painterResource(id = R.drawable.header_choose_your_plan),
+                    contentDescription = "Choose your plan",
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        // ~3x bigger header
+                        .height(210.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
 
             if (!notice.isNullOrBlank()) {
                 Card(
@@ -159,20 +183,11 @@ fun ChoosePlanScreen(
                 TextButton(onClick = onClose) { Text("Not now") }
                 Button(
                     onClick = {
-                        if (isUpgrade) onPickPlan(selectedTier, cycle) else onManageSubscription()
+                        if (shouldPurchaseInApp) onPickPlan(selectedTier, cycle) else onManageSubscription()
                     },
                     enabled = canProceed
                 ) {
-                    Text(if (isUpgrade) "Upgrade" else "Manage in Google Play")
-                }
-            }
-
-            if (currentTier != SubscriptionTier.FREE) {
-                OutlinedButton(
-                    onClick = onManageSubscription,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Manage / cancel subscription (Google Play)")
+                    Text(if (shouldPurchaseInApp) "Upgrade" else "Manage in Google Play")
                 }
             }
 
@@ -200,14 +215,16 @@ private fun PlanCard(
     }
     val borderColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
 
-    Card(
-        onClick = { if (enabled) onClick() },
-        shape = shape,
-        colors = colors,
-        border = BorderStroke(1.dp, borderColor),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Box(modifier = Modifier.fillMaxWidth()) {
+    // Wrap the Card in a Box and draw the badge OUTSIDE the card content so it can't be clipped by
+    // the Card's shape/border.
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Card(
+            onClick = { if (enabled) onClick() },
+            shape = shape,
+            colors = colors,
+            border = BorderStroke(1.dp, borderColor),
+            modifier = Modifier.fillMaxWidth()
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -227,19 +244,21 @@ private fun PlanCard(
                     )
                 }
             }
+        }
 
-            if (badgeResId != null) {
-                Image(
-                    painter = painterResource(badgeResId),
-                    contentDescription = null,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        // "Sticker" feel: slightly off-card + rotated.
-                        .offset(x = 10.dp, y = (-10).dp)
-                        .size(64.dp)
-                        .rotate(30f)
-                )
-            }
+        if (badgeResId != null) {
+            Image(
+                painter = painterResource(badgeResId),
+                contentDescription = null,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    // "Sticker" feel: slightly off-card + rotated.
+                    .offset(x = 22.dp, y = (-26).dp)
+                    // 50% larger than the previous 77dp.
+                    .size(116.dp)
+                    .rotate(30f)
+                    .zIndex(10f)
+            )
         }
     }
 }

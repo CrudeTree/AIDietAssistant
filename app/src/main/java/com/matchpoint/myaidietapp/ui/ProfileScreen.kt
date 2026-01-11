@@ -38,6 +38,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
@@ -62,6 +63,7 @@ import android.net.Uri
 @Composable
 fun ProfileScreen(
     profile: UserProfile,
+    displayTier: SubscriptionTier,
     savedRecipes: List<SavedRecipe>,
     onBack: () -> Unit,
     onRemoveFood: (String) -> Unit,
@@ -75,7 +77,8 @@ fun ProfileScreen(
     isProcessing: Boolean,
     errorText: String?,
     onOpenRecipe: (SavedRecipe) -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    wallpaperSeed: Int
 ) {
     val unit = profile.weightUnit
     fun lbToKg(lb: Double): Double = lb / 2.2046226218
@@ -87,44 +90,15 @@ fun ProfileScreen(
         return "${rounded} $suffix"
     }
 
-    val tier = profile.subscriptionTier
-    val tierLabel = when (tier) {
-        SubscriptionTier.FREE -> "Free"
-        SubscriptionTier.REGULAR -> "Basic"
-        SubscriptionTier.PRO -> "Premium"
-    }
+    val tier = displayTier
     val context = LocalContext.current
 
     Surface {
         Box(modifier = Modifier.fillMaxSize()) {
-            // Cute background wallpaper (subtle, behind everything)
-            Image(
-                painter = painterResource(id = R.drawable.strawberry),
-                contentDescription = null,
-                modifier = Modifier
-                    .size(155.dp)
-                    .offset(x = (-30).dp, y = 110.dp)
-                    .rotate(-16f),
-                alpha = 0.14f
-            )
-            Image(
-                painter = painterResource(id = R.drawable.mushroom),
-                contentDescription = null,
-                modifier = Modifier
-                    .size(170.dp)
-                    .offset(x = 210.dp, y = 260.dp)
-                    .rotate(14f),
-                alpha = 0.12f
-            )
-            Image(
-                painter = painterResource(id = R.drawable.cinnamon),
-                contentDescription = null,
-                modifier = Modifier
-                    .size(180.dp)
-                    .offset(x = (-24).dp, y = 520.dp)
-                    .rotate(18f),
-                alpha = 0.10f
-            )
+            // Random wallpaper icons (ic_food_*): rerolls each time you enter this screen.
+            if (profile.showWallpaperFoodIcons) {
+                RandomFoodWallpaper(seed = wallpaperSeed, count = 24, baseAlpha = 0.10f)
+            }
 
             Column(
                 modifier = Modifier
@@ -139,6 +113,12 @@ fun ProfileScreen(
             ) {
             // Centered title image
             Box(modifier = Modifier.fillMaxWidth()) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier.align(Alignment.CenterStart)
+                ) {
+                    Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back")
+                }
                 Image(
                     painter = painterResource(id = R.drawable.profile),
                     contentDescription = "Profile",
@@ -188,18 +168,27 @@ fun ProfileScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Plan: $tierLabel",
+                        text = "Plan:",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold
                     )
-                    if (tier == SubscriptionTier.REGULAR || tier == SubscriptionTier.PRO) {
-                        val badge = if (tier == SubscriptionTier.REGULAR) R.drawable.ic_basic_badge else R.drawable.ic_premium_badge
+                    if (tier == SubscriptionTier.FREE) {
+                        Text(
+                            text = "Free",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 8.dp)
+                        )
+                    } else {
+                        val badge =
+                            if (tier == SubscriptionTier.REGULAR) R.drawable.ic_basic_badge else R.drawable.ic_premium_badge
                         Image(
                             painter = painterResource(badge),
                             contentDescription = null,
                             modifier = Modifier
                                 .padding(start = 8.dp)
-                                .size(34.dp)
+                                // ~30% larger than 68dp
+                                .size(88.dp)
                         )
                     }
                 }
@@ -221,14 +210,27 @@ fun ProfileScreen(
             }
 
             if (tier != SubscriptionTier.FREE) {
-                OutlinedButton(
-                    onClick = {
-                        val uri = Uri.parse("https://play.google.com/store/account/subscriptions?package=${context.packageName}")
-                        context.startActivity(Intent(Intent.ACTION_VIEW, uri))
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Manage / cancel subscription (Google Play)")
+                // Align "Manage plan" with the Upgrade button above (same right-column width).
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                    val gap = 10.dp
+                    val cellW = (maxWidth - gap) / 2
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .width(cellW),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AlphaHitImageButton(
+                            resId = R.drawable.btn_manage_plan,
+                            size = DpSize(width = 170.dp, height = 64.dp),
+                            contentDescription = "Manage plan",
+                            enabled = !isProcessing,
+                            onClick = {
+                                val uri = Uri.parse("https://play.google.com/store/account/subscriptions?package=${context.packageName}")
+                                context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                            }
+                        )
+                    }
                 }
             }
 

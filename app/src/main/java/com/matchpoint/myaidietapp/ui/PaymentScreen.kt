@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.matchpoint.myaidietapp.BuildConfig
 import com.matchpoint.myaidietapp.billing.RevenueCatEvent
 import com.matchpoint.myaidietapp.billing.RevenueCatPackages
 import com.matchpoint.myaidietapp.billing.RevenueCatRepository
@@ -32,6 +33,8 @@ import com.matchpoint.myaidietapp.model.SubscriptionTier
 
 @Composable
 fun PaymentScreen(
+    authUid: String?,
+    rc: RevenueCatRepository,
     selectedTier: SubscriptionTier?,
     billingCycle: com.matchpoint.myaidietapp.ui.BillingCycle,
     onBack: () -> Unit,
@@ -46,7 +49,6 @@ fun PaymentScreen(
     }
 
     val context = LocalContext.current
-    val rc = remember { RevenueCatRepository() }
     val offerings by rc.offerings.collectAsState()
     val customerInfo by rc.customerInfo.collectAsState()
 
@@ -59,12 +61,45 @@ fun PaymentScreen(
             else -> null
         }
     }
-    val desiredPackage = offerings?.current
-        ?.availablePackages
-        ?.firstOrNull { it.identifier == desiredPackageId }
+    val activeOffering = remember(offerings) {
+        offerings?.current ?: offerings?.all?.values?.firstOrNull()
+    }
+    val desiredPackage = remember(activeOffering, desiredPackageId, selectedTier, billingCycle) {
+        val wantId = desiredPackageId ?: return@remember null
+        val pkgs = activeOffering?.availablePackages ?: return@remember null
+
+        fun pkgMatches(pkg: com.revenuecat.purchases.Package): Boolean {
+            val pkgId = runCatching { pkg.identifier }.getOrNull()
+            val productId = runCatching { pkg.product.id }.getOrNull()
+            if (pkgId == wantId || productId == wantId) return true
+
+            // Fallback heuristic: some dashboards use "$rc_monthly"/"$rc_annual" identifiers, so match by keywords.
+            val ident = (pkgId ?: "").lowercase()
+            val prod = (productId ?: "").lowercase()
+            val cycleOk = if (billingCycle == BillingCycle.YEARLY) {
+                ident.contains("annual") || ident.contains("year") || prod.contains("annual") || prod.contains("year")
+            } else {
+                ident.contains("month") || prod.contains("month")
+            }
+            val tierOk = when (selectedTier) {
+                SubscriptionTier.REGULAR -> ident.contains("basic") || ident.contains("regular") || prod.contains("basic") || prod.contains("regular")
+                SubscriptionTier.PRO -> ident.contains("premium") || ident.contains("pro") || prod.contains("premium") || prod.contains("pro")
+                else -> false
+            }
+            return tierOk && cycleOk
+        }
+
+        pkgs.firstOrNull { pkgMatches(it) }
+    }
 
     LaunchedEffect(Unit) {
-        rc.refresh()
+        // In dev builds, the key may be unset; RevenueCatRepository will emit a non-fatal error.
+        if (BuildConfig.REVENUECAT_API_KEY.isNotBlank()) {
+            // Ensure purchases are made under the same user id the rest of the app/server uses.
+            // Otherwise Google Play can say "already subscribed" while the app shows Free.
+            authUid?.let { rc.logIn(it) }
+            rc.refresh()
+        }
     }
 
     var errorText by remember { mutableStateOf<String?>(null) }
@@ -125,6 +160,67 @@ fun PaymentScreen(
                     color = MaterialTheme.colorScheme.error
                 )
             }
+            if (selectedTier != null &&
+                selectedTier != SubscriptionTier.FREE &&
+                desiredPackage == null
+            ) {
+                // User-facing hint (always safe to show)
+                Text(
+                    text = "Loading subscriptions… If this stays disabled, RevenueCat may not be configured on this build.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                // Developer diagnostics (debug builds only)
+                if (BuildConfig.DEBUG) {
+                    val offeringId = runCatching { activeOffering?.identifier }.getOrNull() ?: "null"
+                    val pkgLines = runCatching {
+                        (activeOffering?.availablePackages ?: emptyList()).joinToString { p ->
+                            val pkgId = runCatching { p.identifier }.getOrNull() ?: "?"
+                            val prodId = runCatching { p.product.id }.getOrNull() ?: "?"
+                            "$pkgId → $prodId"
+                        }
+                    }.getOrNull() ?: ""
+
+                    Text(
+                        text = buildString {
+                            append("DEBUG: Subscribe disabled: no matching RevenueCat package found.\n")
+                            append("SelectedTier=$selectedTier, cycle=$billingCycle\n")
+                            append("desiredPackageId=$desiredPackageId\n")
+                            append("offering=$offeringId\n")
+                            if (BuildConfig.REVENUECAT_API_KEY.isBlank()) {
+                                append("REVENUECAT_API_KEY is blank.\n")
+                            }
+                            if (pkgLines.isNotBlank()) {
+                                append("Packages:\n$pkgLines")
+                            } else {
+                                append("Packages: (none loaded)")
+                            }
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            // Extra developer diagnostics to debug Google Play billing sheet errors.
+            if (BuildConfig.DEBUG) {
+                val infoLine = runCatching {
+                    val appUserId = customerInfo?.originalAppUserId ?: "null"
+                    val activeEnts = customerInfo?.entitlements?.active?.keys?.joinToString() ?: "none"
+                    val pkgId = runCatching { desiredPackage?.identifier }.getOrNull() ?: "null"
+                    val prodId = runCatching { desiredPackage?.product?.id }.getOrNull() ?: "null"
+                    "DEBUG: appUserId=$appUserId, activeEntitlements=$activeEnts, pkg=$pkgId → productId=$prodId"
+                }.getOrNull()
+
+                if (!infoLine.isNullOrBlank()) {
+                    Text(
+                        text = infoLine,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
 
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -148,7 +244,7 @@ fun PaymentScreen(
                     desiredPackage != null,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(if (autoLaunched) "Subscribe (again)" else "Subscribe")
+                Text("Subscribe")
             }
 
             OutlinedButton(

@@ -20,12 +20,21 @@ class RecipesRepository(
             .limit(limit.toLong())
             .get()
             .await()
-        return snap.documents.mapNotNull { it.toObject(SavedRecipe::class.java) }
+        return snap.documents.mapNotNull { doc ->
+            val r = doc.toObject(SavedRecipe::class.java) ?: return@mapNotNull null
+            // Defensive: if an old doc didn't store the id field, fall back to Firestore doc id.
+            if (r.id.isBlank()) r.copy(id = doc.id) else r
+        }
     }
 
     suspend fun saveRecipe(recipe: SavedRecipe) {
         val id = recipe.id.ifBlank { throw IllegalArgumentException("SavedRecipe.id must not be blank") }
         recipesCollection.document(id).set(recipe).await()
+    }
+
+    suspend fun deleteRecipe(recipeId: String) {
+        if (recipeId.isBlank()) return
+        recipesCollection.document(recipeId).delete().await()
     }
 }
 

@@ -43,6 +43,13 @@ enum class WeightUnit {
     KG
 }
 
+enum class RecipeTitleFontStyle {
+    HANDWRITTEN_SERIF,
+    VINTAGE_COOKBOOK,
+    RUSTIC_SCRIPT,
+    FARMHOUSE_ARTISAN
+}
+
 data class WeightEntry(
     val date: String = "",
     /**
@@ -152,10 +159,22 @@ data class UserProfile(
      */
     val showFoodIcons: Boolean = true,
     /**
+     * UI preference: show the background wallpaper of random ic_food_* icons.
+     */
+    val showWallpaperFoodIcons: Boolean = true,
+    /**
+     * One-time-only friendly intro. When true, we won't auto-insert the intro messages again.
+     */
+    val hasSeenWelcomeIntro: Boolean = false,
+    /**
      * UI preference: base font size (sp) for long-form content like recipes and chat.
      * Kept in a safe range in UI (e.g. 12..40) to avoid breaking layouts.
      */
     val uiFontSizeSp: Float = 18f,
+    /**
+     * UI preference: font style for recipe titles on the Recipes screen.
+     */
+    val recipeTitleFontStyle: RecipeTitleFontStyle = RecipeTitleFontStyle.VINTAGE_COOKBOOK,
     val fastingPreset: FastingPreset = FastingPreset.NONE,
     /**
      * Local-time eating window start/end (minutes from midnight).
@@ -221,12 +240,29 @@ data class MessageLog(
 )
 
 /**
+ * A chat session ("conversation") for the AI chat screen.
+ * Stored under users/{uid}/chats/{chatId} as metadata; messages are stored separately.
+ */
+data class ChatSession(
+    val id: String = "",
+    val createdAt: Timestamp = Timestamp.now(),
+    val updatedAt: Timestamp = Timestamp.now(),
+    val title: String = "Chat",
+    val lastSnippet: String? = null
+)
+
+/**
  * Saved AI recipe stored under users/{uid}/recipes/{id}.
  *
  * `id` is typically the source MessageEntry.id to make saves idempotent.
  */
 data class SavedRecipe(
     val id: String = "",
+    /**
+     * The chat message ID this recipe originated from (if saved from chat).
+     * Used to prevent accidental duplicates while still allowing unique Firestore doc IDs.
+     */
+    val sourceMessageId: String? = null,
     val createdAt: Timestamp = Timestamp.now(),
     val title: String = "",
     val text: String = "",

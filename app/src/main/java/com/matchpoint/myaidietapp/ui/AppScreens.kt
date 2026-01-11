@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.matchpoint.myaidietapp.ui
 
 import androidx.activity.result.contract.ActivityResultContracts
@@ -5,6 +7,10 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.ui.window.Dialog
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,12 +20,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
@@ -39,21 +47,25 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,6 +75,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.matchpoint.myaidietapp.ui.FoodIconResolver
+import com.matchpoint.myaidietapp.logic.RecipeParser
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.text.KeyboardActions
@@ -90,11 +104,29 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.time.LocalTime
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.DpSize
 import com.matchpoint.myaidietapp.billing.RevenueCatEvent
 import com.matchpoint.myaidietapp.billing.RevenueCatPackages
 import com.matchpoint.myaidietapp.billing.RevenueCatRepository
 import com.revenuecat.purchases.CustomerInfo
 import com.revenuecat.purchases.Offerings
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.Dp
+import androidx.compose.animation.core.Animatable
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import com.matchpoint.myaidietapp.data.ReviewPromptManager
 
 private enum class Screen {
     HOME,
@@ -103,12 +135,12 @@ private enum class Screen {
     FOOD_LIST,
     RECIPES,
     ADD_ENTRY,
+    ADD_FOOD_CATEGORY,
     TEXT_FOOD_ENTRY,
     PHOTO_CAPTURE,
     MEAL_LOG,
     GROCERY_SCAN,
     MENU_SCAN,
-    PAYMENT,
     CHOOSE_PLAN,
     RECIPE_DETAIL
 }
@@ -116,6 +148,54 @@ private enum class Screen {
 enum class BillingCycle {
     MONTHLY,
     YEARLY
+}
+
+private data class PurchaseRequest(
+    val tier: com.matchpoint.myaidietapp.model.SubscriptionTier,
+    val cycle: BillingCycle
+)
+
+private fun findDesiredRevenueCatPackage(
+    offerings: Offerings?,
+    selectedTier: com.matchpoint.myaidietapp.model.SubscriptionTier,
+    billingCycle: BillingCycle
+): com.revenuecat.purchases.Package? {
+    val activeOffering = offerings?.current ?: offerings?.all?.values?.firstOrNull() ?: return null
+
+    val desiredPackageId = when (selectedTier) {
+        com.matchpoint.myaidietapp.model.SubscriptionTier.REGULAR ->
+            if (billingCycle == BillingCycle.YEARLY) RevenueCatPackages.BASIC_ANNUAL else RevenueCatPackages.BASIC_MONTHLY
+        com.matchpoint.myaidietapp.model.SubscriptionTier.PRO ->
+            if (billingCycle == BillingCycle.YEARLY) RevenueCatPackages.PREMIUM_ANNUAL else RevenueCatPackages.PREMIUM_MONTHLY
+        else -> null
+    } ?: return null
+
+    val pkgs = activeOffering.availablePackages
+
+    fun pkgMatches(pkg: com.revenuecat.purchases.Package): Boolean {
+        val pkgId = runCatching { pkg.identifier }.getOrNull()
+        val productId = runCatching { pkg.product.id }.getOrNull()
+        if (pkgId == desiredPackageId || productId == desiredPackageId) return true
+
+        // Fallback heuristic: match by keywords when identifiers differ.
+        val ident = (pkgId ?: "").lowercase()
+        val prod = (productId ?: "").lowercase()
+        val cycleOk = if (billingCycle == BillingCycle.YEARLY) {
+            ident.contains("annual") || ident.contains("year") || prod.contains("annual") || prod.contains("year")
+        } else {
+            ident.contains("month") || prod.contains("month")
+        }
+        val tierOk = when (selectedTier) {
+            com.matchpoint.myaidietapp.model.SubscriptionTier.REGULAR ->
+                ident.contains("basic") || ident.contains("regular") || prod.contains("basic") || prod.contains("regular")
+            com.matchpoint.myaidietapp.model.SubscriptionTier.PRO ->
+                ident.contains("premium") || ident.contains("pro") || prod.contains("premium") || prod.contains("pro")
+            else -> false
+        }
+        return tierOk && cycleOk
+    }
+
+    return pkgs.firstOrNull { pkgMatches(it) }
 }
 
 private fun inferCurrentBillingCycle(
@@ -172,13 +252,15 @@ fun DigitalStomachApp() {
         )
     }
     var screen by remember { mutableStateOf(Screen.HOME) }
+    // Pick wallpaper once per app launch to avoid jank when navigating between screens.
+    val wallpaperSeed = remember { kotlin.random.Random.nextInt() }
     val backStack = remember { androidx.compose.runtime.mutableStateListOf<Screen>() }
     var textEntryMode by remember { mutableStateOf(TextEntryMode.MEAL) }
     var foodListFilter by remember { mutableStateOf<String?>(null) }
     var lockedPhotoCategories by remember { mutableStateOf<Set<String>?>(null) }
-    var pendingUpgradeTier by remember { mutableStateOf<com.matchpoint.myaidietapp.model.SubscriptionTier?>(null) }
-    var pendingUpgradeCycle by remember { mutableStateOf(BillingCycle.MONTHLY) }
     var pendingPlanNotice by remember { mutableStateOf<String?>(null) }
+    var pendingPurchase by remember { mutableStateOf<PurchaseRequest?>(null) }
+    var purchaseInFlight by remember { mutableStateOf(false) }
     var openRecipeId by remember { mutableStateOf<String?>(null) }
     // Photo-based food capture no longer uses a quantity (always 1).
 
@@ -195,6 +277,8 @@ fun DigitalStomachApp() {
             screen = Screen.HOME
         }
     }
+
+    // Intentionally do NOT reroll wallpaper per screen to keep navigation smooth.
 
     fun goHomeClear() {
         backStack.clear()
@@ -252,25 +336,90 @@ fun DigitalStomachApp() {
         val realVm = vm!!
         val state by realVm.uiState.collectAsState()
 
-        // Keep Firestore "subscriptionTier" in sync with RevenueCat entitlements.
-        // This prevents stale "Basic" in-app if a test sub expires/cancels in Play.
+        // RevenueCat is used for UI display, but server enforces quotas and writes tier back to Firestore.
         val rc = remember { RevenueCatRepository() }
         val rcOfferings by rc.offerings.collectAsState()
         val rcCustomerInfo by rc.customerInfo.collectAsState()
         LaunchedEffect(authUid) {
+            val uid = authUid ?: return@LaunchedEffect
             // On fresh dev machines, REVENUECAT_API_KEY may be unset; RevenueCatRepository will emit a
             // non-fatal error event. Avoid spamming refresh calls in that case by gating here too.
             if (com.matchpoint.myaidietapp.BuildConfig.REVENUECAT_API_KEY.isNotBlank()) {
+                // Important: use Firebase uid as RevenueCat app user id so the client and server
+                // (which verifies via RevenueCat REST API) see the same entitlements.
+                rc.logIn(uid)
                 rc.refresh()
-                rc.events.collect { e ->
-                    if (e is RevenueCatEvent.TierUpdated) {
-                        val currentTier = realVm.uiState.value.profile?.subscriptionTier
-                        if (currentTier != null && currentTier != e.tier) {
-                            realVm.updateSubscriptionTier(e.tier)
+            }
+        }
+
+        // Handle purchase results globally so the UI updates everywhere (no intermediate payment screen).
+        LaunchedEffect(rc) {
+            rc.events.collect { e ->
+                when (e) {
+                    is RevenueCatEvent.Error -> {
+                        purchaseInFlight = false
+                        // Keep the user on the plan page if they're there, and show the message.
+                        pendingPlanNotice = e.message
+                    }
+                    is RevenueCatEvent.TierUpdated -> {
+                        if (purchaseInFlight && e.tier != com.matchpoint.myaidietapp.model.SubscriptionTier.FREE) {
+                            purchaseInFlight = false
+                            pendingPlanNotice = null
+                            goHomeClear()
                         }
                     }
                 }
             }
+        }
+
+        // If user tapped "Upgrade/Change plan", launch the Google Play purchase sheet immediately
+        // once offerings are available.
+        LaunchedEffect(pendingPurchase, rcOfferings, authUid) {
+            val req = pendingPurchase ?: return@LaunchedEffect
+            val uid = authUid ?: run {
+                pendingPlanNotice = "Please sign in to manage subscriptions."
+                pendingPurchase = null
+                return@LaunchedEffect
+            }
+
+            if (com.matchpoint.myaidietapp.BuildConfig.REVENUECAT_API_KEY.isBlank()) {
+                pendingPlanNotice = "Subscriptions unavailable on this build (missing REVENUECAT_API_KEY)."
+                pendingPurchase = null
+                return@LaunchedEffect
+            }
+
+            // Ensure we are logged into the canonical user id.
+            rc.logIn(uid)
+
+            val act = context as? android.app.Activity
+            if (act == null) {
+                pendingPlanNotice = "Unable to start billing: no Activity."
+                pendingPurchase = null
+                return@LaunchedEffect
+            }
+
+            val offerings = rcOfferings
+            if (offerings == null) {
+                pendingPlanNotice = "Loading subscriptions…"
+                rc.refresh()
+                return@LaunchedEffect
+            }
+
+            val pkg = findDesiredRevenueCatPackage(
+                offerings = offerings,
+                selectedTier = req.tier,
+                billingCycle = req.cycle
+            )
+            if (pkg == null) {
+                pendingPlanNotice = "Unable to load the selected plan. Please try again in a moment."
+                pendingPurchase = null
+                return@LaunchedEffect
+            }
+
+            pendingPurchase = null
+            pendingPlanNotice = null
+            purchaseInFlight = true
+            rc.purchase(act, pkg)
         }
 
         val currentTierForPlanUi =
@@ -300,6 +449,8 @@ fun DigitalStomachApp() {
         when {
             state.isLoading -> LoadingScreen()
             state.profile == null -> OnboardingScreen(
+                isProcessing = state.isProcessing,
+                errorText = state.error,
                 onComplete = { name, goal, diet, weight, unit, fasting, startMinutes ->
                     realVm.completeOnboarding(name, goal, diet, weight, unit, fasting, startMinutes)
                     goHomeClear()
@@ -317,6 +468,22 @@ fun DigitalStomachApp() {
                 onAddItemByPhotos = {
                     lockedPhotoCategories = null
                     navigate(Screen.PHOTO_CAPTURE)
+                },
+                onBack = { popOrHome() }
+            )
+            screen == Screen.ADD_FOOD_CATEGORY && state.profile != null -> AddFoodCategoryScreen(
+                enabled = !state.isProcessing,
+                onPickMeals = {
+                    foodListFilter = "MEAL"
+                    navigate(Screen.FOOD_LIST)
+                },
+                onPickSnacks = {
+                    foodListFilter = "SNACK"
+                    navigate(Screen.FOOD_LIST)
+                },
+                onPickIngredients = {
+                    foodListFilter = "INGREDIENT"
+                    navigate(Screen.FOOD_LIST)
                 },
                 onBack = { popOrHome() }
             )
@@ -415,6 +582,7 @@ fun DigitalStomachApp() {
             )
             screen == Screen.PROFILE && state.profile != null -> ProfileScreen(
                 profile = state.profile!!,
+                displayTier = currentTierForPlanUi,
                 savedRecipes = state.savedRecipes,
                 onBack = { popOrHome() },
                 onRemoveFood = { vm.removeFoodItem(it) },
@@ -437,7 +605,8 @@ fun DigitalStomachApp() {
                     openRecipeId = recipe.id
                     navigate(Screen.RECIPE_DETAIL)
                 },
-                onOpenSettings = { navigate(Screen.SETTINGS) }
+                onOpenSettings = { navigate(Screen.SETTINGS) },
+                wallpaperSeed = wallpaperSeed
             )
             screen == Screen.SETTINGS && state.profile != null -> SettingsScreen(
                 profile = state.profile!!,
@@ -445,13 +614,15 @@ fun DigitalStomachApp() {
                 errorText = state.error,
                 onBack = { popOrHome() },
                 onToggleShowFoodIcons = { show -> vm.updateShowFoodIcons(show) },
+                onToggleShowWallpaperFoodIcons = { show -> vm.updateShowWallpaperFoodIcons(show) },
                 onSetFontSizeSp = { sp -> vm.updateUiFontSizeSp(sp) },
                 onUpdateWeightUnit = { unit -> vm.updateWeightUnit(unit) },
                 onUpdateWeightGoal = { goal -> vm.updateWeightGoal(goal) },
                 onDietChange = { vm.updateDiet(it) },
                 onUpdateFastingPreset = { vm.updateFastingPreset(it) },
                 onUpdateEatingWindowStart = { vm.updateEatingWindowStart(it) },
-                onDeleteAccount = { password -> vm.deleteAccount(password) }
+                onDeleteAccount = { password -> vm.deleteAccount(password) },
+                wallpaperSeed = wallpaperSeed
             )
             screen == Screen.RECIPES -> RecipesScreen(
                 recipes = state.savedRecipes,
@@ -459,7 +630,17 @@ fun DigitalStomachApp() {
                 onOpenRecipe = { recipe ->
                     openRecipeId = recipe.id
                     navigate(Screen.RECIPE_DETAIL)
-                }
+                },
+                onDeleteRecipe = { recipeId ->
+                    vm.deleteSavedRecipe(recipeId)
+                },
+                titleFontStyle = state.profile?.recipeTitleFontStyle
+                    ?: com.matchpoint.myaidietapp.model.RecipeTitleFontStyle.VINTAGE_COOKBOOK,
+                onSetTitleFontStyle = { style ->
+                    vm.updateRecipeTitleFontStyle(style)
+                },
+                wallpaperSeed = wallpaperSeed,
+                showWallpaperFoodIcons = state.profile?.showWallpaperFoodIcons != false
             )
             screen == Screen.RECIPE_DETAIL && state.profile != null -> run {
                 val recipe = openRecipeId?.let { id -> state.savedRecipes.firstOrNull { it.id == id } }
@@ -475,32 +656,37 @@ fun DigitalStomachApp() {
                     )
                 }
             }
-            screen == Screen.PAYMENT -> PaymentScreen(
-                selectedTier = pendingUpgradeTier,
-                billingCycle = pendingUpgradeCycle,
-                onBack = { popOrHome() },
-                onEntitlementGranted = { tier ->
-                    // Source of truth is Firestore user profile; this also drives server-side quota enforcement.
-                    realVm.updateSubscriptionTier(tier)
-                    pendingPlanNotice = null
-                    goHomeClear()
-                }
-            )
             screen == Screen.CHOOSE_PLAN && state.profile != null -> ChoosePlanScreen(
                 currentTier = currentTierForPlanUi,
                 currentCycle = currentCycleForPlanUi,
                 notice = pendingPlanNotice,
                 onClose = { popOrHome() },
                 onPickPlan = { tier, cycle ->
-                    pendingUpgradeTier = tier
-                    pendingUpgradeCycle = cycle
-                    navigate(Screen.PAYMENT)
+                    pendingPlanNotice = null
+                    pendingPurchase = PurchaseRequest(tier = tier, cycle = cycle)
                 },
                 onManageSubscription = {
                     // Cancellation/downgrade is managed by Google Play.
-                    // Send user to the Play subscriptions management screen for this app.
+                    // Send user to the Play subscriptions management screen.
+                    //
+                    // Include the currently-active subscription id (sku) if we can infer it, so the
+                    // page can't appear empty due to filtering/account confusion.
+                    //
+                    // Note: RevenueCat's activeSubscriptions often uses the form "subscriptionId:basePlanId".
+                    // The Play URL expects the subscriptionId portion (before ':').
+                    val activeSku = runCatching {
+                        rcCustomerInfo?.activeSubscriptions?.firstOrNull()
+                            ?.substringBefore(':')
+                            ?.trim()
+                            ?.takeIf { it.isNotBlank() }
+                    }.getOrNull()
+
                     val uri = android.net.Uri.parse(
-                        "https://play.google.com/store/account/subscriptions?package=${context.packageName}"
+                        if (activeSku != null) {
+                            "https://play.google.com/store/account/subscriptions?package=${context.packageName}&sku=$activeSku"
+                        } else {
+                            "https://play.google.com/store/account/subscriptions?package=${context.packageName}"
+                        }
                     )
                     val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
                     context.startActivity(intent)
@@ -516,13 +702,17 @@ fun DigitalStomachApp() {
                 onConfirmMeal = { vm.confirmMealConsumed() },
                 onSendChat = { vm.sendFreeformMessage(it) },
                 onOpenProfile = { navigate(Screen.PROFILE) },
-                onOpenAddEntry = { navigate(Screen.ADD_ENTRY) },
+                onOpenAddEntry = { navigate(Screen.ADD_FOOD_CATEGORY) },
                 onOpenGroceryScan = { navigate(Screen.GROCERY_SCAN) },
                 onOpenMenuScan = { navigate(Screen.MENU_SCAN) },
-                onGenerateMeal = { vm.generateMeal() },
+                onGenerateMeal = { required -> vm.generateMeal(required) },
                 onSaveRecipe = { messageId -> vm.saveRecipeFromMessage(messageId) },
                 onConfirmGroceryAdd = { vm.confirmAddPendingGrocery() },
-                onDiscardGrocery = { vm.discardPendingGrocery() }
+                onDiscardGrocery = { vm.discardPendingGrocery() },
+                onNewChat = { vm.newChat() },
+                onSelectChat = { chatId -> vm.selectChat(chatId) },
+                onDeleteChat = { chatId -> vm.deleteChat(chatId) },
+                wallpaperSeed = wallpaperSeed
             )
         }
     }
@@ -544,6 +734,8 @@ fun LoadingScreen() {
 
 @Composable
 fun OnboardingScreen(
+    isProcessing: Boolean = false,
+    errorText: String? = null,
     onComplete: (
         name: String,
         weightGoal: Double?,
@@ -569,7 +761,10 @@ fun OnboardingScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(24.dp)
-            .verticalScroll(rememberScrollState()),
+            .verticalScroll(rememberScrollState())
+            // Keep the bottom button visible above the nav bar / keyboard during onboarding.
+            .navigationBarsPadding()
+            .imePadding(),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Text(
@@ -581,6 +776,14 @@ fun OnboardingScreen(
             text = "A diet assistant to help you manage your food list, scan groceries/menus, and generate recipes.",
             style = MaterialTheme.typography.bodyMedium
         )
+
+        if (!errorText.isNullOrBlank()) {
+            Text(
+                text = errorText,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
 
         OutlinedTextField(
             value = nameText,
@@ -798,9 +1001,19 @@ fun OnboardingScreen(
                     selectedStartMinutes
                 )
             },
+            enabled = !isProcessing,
             modifier = Modifier.align(Alignment.End)
         ) {
-            Text("Lock it in")
+            if (isProcessing) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Saving…")
+            } else {
+                Text("Lock it in")
+            }
         }
     }
 }
@@ -817,105 +1030,157 @@ fun HomeScreen(
     onOpenAddEntry: () -> Unit,
     onOpenGroceryScan: () -> Unit,
     onOpenMenuScan: () -> Unit,
-    onGenerateMeal: () -> Unit,
+    onGenerateMeal: (requiredIngredients: List<String>) -> Unit,
     onSaveRecipe: (messageId: String) -> Unit,
     onConfirmGroceryAdd: () -> Unit,
-    onDiscardGrocery: () -> Unit
+    onDiscardGrocery: () -> Unit,
+    onNewChat: () -> Unit,
+    onSelectChat: (chatId: String) -> Unit,
+    onDeleteChat: (chatId: String) -> Unit,
+    wallpaperSeed: Int
 ) {
     var chatInput by remember { mutableStateOf("") }
+    var chatFullscreen by rememberSaveable { mutableStateOf(false) }
+    var historyOpen by rememberSaveable { mutableStateOf(false) }
+    var pendingDeleteChatId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showGeneratePopup by rememberSaveable { mutableStateOf(false) }
+    var showReviewPrompt by rememberSaveable { mutableStateOf(false) }
+    val requiredSelections = remember { mutableStateListOf<String>() }
+    val context = LocalContext.current
+    val reviewPromptManager = remember(context) { ReviewPromptManager(context.applicationContext) }
     val nowMillis = System.currentTimeMillis()
     val mealDue = state.profile?.nextMealAtMillis?.let { nowMillis >= it } == true
     val fontSp = state.profile?.uiFontSizeSp?.coerceIn(12f, 40f) ?: 18f
     val vineHeight = 140.dp
     val density = LocalDensity.current
     var chatTopPx by remember { mutableStateOf(0) }
+    // Keep track of AI messages that finished "typing" so we don't re-animate when scrolling.
+    // Must survive leaving/re-entering HomeScreen, otherwise messages re-type every time you navigate back.
+    val typedAiDoneIds = rememberSaveable(
+        state.activeChatId,
+        saver = listSaver(
+            // Explicitly type the parameter so Kotlin doesn't infer it as `Any`
+            // (which would make extension functions like `toList()` / `map()` unavailable).
+            save = { stateList: List<String> -> stateList.toList() },
+            restore = { restored -> mutableStateListOf<String>().also { it.addAll(restored) } }
+        )
+    ) {
+        mutableStateListOf()
+    }
+
+    // Trigger the review prompt once eligible. Manager ensures it won't spam.
+    val foodCount = state.profile?.foodItems?.size ?: 0
+    val recipeCount = state.savedRecipes.size
+    LaunchedEffect(foodCount, recipeCount, state.messages.size, state.activeChatId) {
+        if (!showReviewPrompt && reviewPromptManager.shouldShowPrompt(foodCount, recipeCount)) {
+            reviewPromptManager.markShown()
+            showReviewPrompt = true
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // Title art as a background overlay (doesn't take layout space).
-        // Draw it inside a short, clipped top band so it *looks* anchored to the top,
-        // while hiding the PNG's extra transparent padding.
-        val titleBandHeight = 200.dp
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .height(titleBandHeight)
-                .clipToBounds()
-        ) {
-            Image(
-                painter = painterResource(id = R.drawable.aidietassistanttext),
-                contentDescription = "AI Diet Assistant",
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    // Keep it very large (~3x) but shift up so the visible text sits at the top.
-                    // Now ~2x bigger than before, and slightly lower.
-                    // ~50% larger than 1800dp
-                    .height(2700.dp)
-                    // Pull up a bit to reduce empty space above the visible art.
-                    .offset(y = (-60).dp)
-                    .alpha(0.92f),
-                contentScale = ContentScale.Fit
+        if (showReviewPrompt) {
+            AlertDialog(
+                onDismissRequest = { showReviewPrompt = false },
+                title = { Text("Leave a review?") },
+                text = {
+                    Text("If you’re enjoying AI Diet Assistant, would you mind leaving a quick review on Google Play?")
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showReviewPrompt = false
+                            // Never ask again after they choose to leave a review.
+                            reviewPromptManager.disableForever()
+                            val pkg = context.packageName
+                            val intent = android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse("market://details?id=$pkg")
+                            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            try {
+                                context.startActivity(intent)
+                            } catch (_: Exception) {
+                                // Fallback to https if Play Store app isn't available.
+                                val web = android.content.Intent(
+                                    android.content.Intent.ACTION_VIEW,
+                                    android.net.Uri.parse("https://play.google.com/store/apps/details?id=$pkg")
+                                ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                context.startActivity(web)
+                            }
+                        }
+                    ) { Text("Leave review") }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(
+                            onClick = {
+                                showReviewPrompt = false
+                                reviewPromptManager.deferOneWeek()
+                            }
+                        ) { Text("Later") }
+                        TextButton(
+                            onClick = {
+                                showReviewPrompt = false
+                                reviewPromptManager.disableForever()
+                            }
+                        ) { Text("No thanks") }
+                    }
+                }
             )
         }
 
-        // Cute background wallpaper (subtle, behind everything)
-        // Keep low alpha so it doesn't fight with readability.
-        Image(
-            painter = painterResource(id = R.drawable.tomato),
-            contentDescription = null,
-            modifier = Modifier
-                .size(160.dp)
-                .offset(x = (-36).dp, y = 90.dp)
-                .rotate(-18f),
-            alpha = 0.16f
-        )
-        Image(
-            painter = painterResource(id = R.drawable.blueberries),
-            contentDescription = null,
-            modifier = Modifier
-                .size(150.dp)
-                .offset(x = 220.dp, y = 220.dp)
-                .rotate(14f),
-            alpha = 0.14f
-        )
-        Image(
-            painter = painterResource(id = R.drawable.ic_food_peas),
-            contentDescription = null,
-            modifier = Modifier
-                .size(170.dp)
-                .offset(x = 205.dp, y = 560.dp)
-                .rotate(-12f),
-            alpha = 0.12f
-        )
-        // Keep bayleaf away from peas (both green).
-        Image(
-            painter = painterResource(id = R.drawable.bayleaf),
-            contentDescription = null,
-            modifier = Modifier
-                .size(170.dp)
-                .offset(x = (-24).dp, y = 520.dp)
-                .rotate(16f),
-            alpha = 0.10f
-        )
+        if (!chatFullscreen) {
+            // Title art as a background overlay (doesn't take layout space).
+            // Draw it inside a short, clipped top band so it *looks* anchored to the top,
+            // while hiding the PNG's extra transparent padding.
+            val titleBandHeight = 200.dp
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .height(titleBandHeight)
+                    .clipToBounds()
+            ) {
+                Image(
+                    painter = painterResource(id = R.drawable.aidietassistanttext),
+                    contentDescription = "AI Diet Assistant",
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        // Keep it very large (~3x) but shift up so the visible text sits at the top.
+                        // Now ~2x bigger than before, and slightly lower.
+                        // ~50% larger than 1800dp
+                        .height(2700.dp)
+                        // Pull up a bit to reduce empty space above the visible art.
+                        .offset(y = (-60).dp)
+                        .alpha(0.92f),
+                    contentScale = ContentScale.Fit
+                )
+            }
 
-        // Profile button (overlay, doesn't take layout space)
-        IconButton(
-            onClick = onOpenProfile,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .statusBarsPadding()
-                .padding(top = 8.dp, end = 8.dp)
-                .zIndex(1000f)
-                // Ensure the icon button itself is large (otherwise the Image gets constrained).
-                .size(68.dp)
-        ) {
-            Image(
-                painter = painterResource(id = R.drawable.carrot),
-                contentDescription = "Profile",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Fit
-            )
+            // Random wallpaper icons (ic_food_*): rerolls each time you enter this screen.
+            if (state.profile?.showWallpaperFoodIcons != false) {
+                RandomFoodWallpaper(seed = wallpaperSeed, count = 24, baseAlpha = 0.12f)
+            }
+
+            // Profile button (overlay, doesn't take layout space)
+            IconButton(
+                onClick = onOpenProfile,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(top = 8.dp, end = 8.dp)
+                    .zIndex(1000f)
+                    // Ensure the icon button itself is large (otherwise the Image gets constrained).
+                    .size(68.dp)
+            ) {
+                Image(
+                    painter = painterResource(id = R.drawable.carrot),
+                    contentDescription = "Profile",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit
+                )
+            }
         }
 
         Column(
@@ -925,101 +1190,123 @@ fun HomeScreen(
                 .padding(horizontal = 16.dp)
                 .navigationBarsPadding()
         ) {
-        // Spacer to position the button stack under the background title art.
-        // Increase slightly so there's more separation below the header.
-        Spacer(modifier = Modifier.height(84.dp))
+        if (!chatFullscreen) {
+            // Spacer to position the button stack under the background title art.
+            // Increase slightly so there's more separation below the header.
+            Spacer(modifier = Modifier.height(84.dp))
 
-        // "Pyramid" actions: use TextButton (no bubble/border), wrap to content, centered.
-        TextButton(
-            onClick = onOpenAddEntry,
-            modifier = Modifier.align(Alignment.CenterHorizontally),
-            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            // "Pyramid" actions: use TextButton (no bubble/border), wrap to content, centered.
+            TextButton(
+                onClick = onOpenAddEntry,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
             ) {
-                Text("+ Meal, Snack, Ingredient")
-                Image(
-                    painter = painterResource(id = R.drawable.forkknife),
-                    contentDescription = null,
-                    modifier = Modifier.size(44.dp),
-                    contentScale = ContentScale.Fit
-                )
+                val iconSize = 44.dp
+                val iconGap = 10.dp
+                Row(
+                    // Add left padding equal to the trailing icon (+ gap) so the text stays
+                    // visually centered even when a trailing icon is present.
+                    modifier = Modifier.padding(start = iconSize + iconGap),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(iconGap)
+                ) {
+                    Text("+ Meal, Snack, Ingredient")
+                    Image(
+                        painter = painterResource(id = R.drawable.forkknife),
+                        contentDescription = null,
+                        modifier = Modifier.size(iconSize),
+                        contentScale = ContentScale.Fit
+                    )
+                }
             }
-        }
 
-        Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(2.dp))
 
-        TextButton(
-            onClick = onOpenGroceryScan,
-            modifier = Modifier.align(Alignment.CenterHorizontally),
-            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            TextButton(
+                onClick = onOpenGroceryScan,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
             ) {
-                Text("Grocery Shopping Scan")
-                Image(
-                    painter = painterResource(id = R.drawable.grocery),
-                    contentDescription = null,
-                    modifier = Modifier.size(44.dp),
-                    contentScale = ContentScale.Fit
-                )
+                val iconSize = 44.dp
+                val iconGap = 10.dp
+                Row(
+                    modifier = Modifier.padding(start = iconSize + iconGap),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(iconGap)
+                ) {
+                    Text("Grocery Shopping Scan")
+                    Image(
+                        painter = painterResource(id = R.drawable.grocery),
+                        contentDescription = null,
+                        modifier = Modifier.size(iconSize),
+                        contentScale = ContentScale.Fit
+                    )
+                }
             }
-        }
 
-        Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(2.dp))
 
-        TextButton(
-            onClick = onGenerateMeal,
-            modifier = Modifier.align(Alignment.CenterHorizontally),
-            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            TextButton(
+                onClick = onOpenMenuScan,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
             ) {
-                Text("Generate Meal")
-                Image(
-                    painter = painterResource(id = R.drawable.salad),
-                    contentDescription = null,
-                    modifier = Modifier.size(53.dp),
-                    contentScale = ContentScale.Fit
-                )
+                val iconSize = 44.dp
+                val iconGap = 10.dp
+                Row(
+                    modifier = Modifier.padding(start = iconSize + iconGap),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(iconGap)
+                ) {
+                    Text("Menu Scan")
+                    Image(
+                        painter = painterResource(id = R.drawable.menu),
+                        contentDescription = null,
+                        modifier = Modifier.size(iconSize),
+                        contentScale = ContentScale.Fit
+                    )
+                }
             }
-        }
 
-        Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(2.dp))
 
-        TextButton(
-            onClick = onOpenMenuScan,
-            modifier = Modifier.align(Alignment.CenterHorizontally),
-            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            TextButton(
+                onClick = {
+                    requiredSelections.clear()
+                    showGeneratePopup = true
+                },
+                enabled = !state.isProcessing,
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
             ) {
-                Text("Menu Scan")
-                Image(
-                    painter = painterResource(id = R.drawable.menu),
-                    contentDescription = null,
-                    modifier = Modifier.size(44.dp),
-                    contentScale = ContentScale.Fit
-                )
+                val iconSize = 53.dp
+                val iconGap = 10.dp
+                Row(
+                    modifier = Modifier.padding(start = iconSize + iconGap),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(iconGap)
+                ) {
+                    Text("Generate Recipe")
+                    Image(
+                        painter = painterResource(id = R.drawable.salad),
+                        contentDescription = null,
+                        modifier = Modifier.size(iconSize),
+                        contentScale = ContentScale.Fit
+                    )
+                }
             }
+
+            Spacer(modifier = Modifier.height(50.dp))
+        } else {
+            Spacer(modifier = Modifier.height(8.dp))
         }
 
         // Food list removed from AI Food Coach page (Home).
         // Access via Profile -> "View foods list".
-
-        Spacer(modifier = Modifier.height(50.dp))
 
         // Chat history
         Box(
@@ -1030,31 +1317,205 @@ fun HomeScreen(
                     chatTopPx = coords.positionInRoot().y.toInt()
                 }
         ) {
+            // History drawer (only in fullscreen): slides in from the right
+            if (chatFullscreen && historyOpen) {
+                // Scrim
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(Color.Black.copy(alpha = 0.35f))
+                        .zIndex(2500f)
+                        .pointerInput(Unit) {
+                            detectTapGestures(onTap = { historyOpen = false })
+                        }
+                )
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .fillMaxHeight()
+                        .width(280.dp)
+                        .background(MaterialTheme.colorScheme.surface)
+                        .zIndex(2600f)
+                        .padding(12.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Chats", fontWeight = FontWeight.SemiBold)
+                            TextButton(onClick = { historyOpen = false }) { Text("Close") }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Button(
+                            onClick = {
+                                historyOpen = false
+                                onNewChat()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("New chat")
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            state.chatSessions.forEach { c ->
+                                val isActive = c.id == state.activeChatId
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .combinedClickable(
+                                            onClick = {
+                                                historyOpen = false
+                                                onSelectChat(c.id)
+                                            },
+                                            onLongClick = {
+                                                // Don't allow deleting the protected default chat.
+                                                if (c.id != "default") {
+                                                    pendingDeleteChatId = c.id
+                                                }
+                                            }
+                                        )
+                                        .padding(vertical = 10.dp, horizontal = 8.dp)
+                                ) {
+                                    Text(
+                                        text = c.title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.SemiBold,
+                                        color = if (isActive) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Long-press delete confirm
+            pendingDeleteChatId?.let { chatId ->
+                val chatTitle = state.chatSessions.firstOrNull { it.id == chatId }?.title ?: "Chat"
+                AlertDialog(
+                    onDismissRequest = { pendingDeleteChatId = null },
+                    title = { Text("Delete chat?") },
+                    text = { Text("Delete \"$chatTitle\"? This cannot be undone.") },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                pendingDeleteChatId = null
+                                onDeleteChat(chatId)
+                            }
+                        ) { Text("Delete") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingDeleteChatId = null }) { Text("Cancel") }
+                    }
+                )
+            }
+
+            val iconColor = Color.Black
+
+            // History button (3 lines) in upper-left, only in fullscreen
+            if (chatFullscreen) {
+                FilledIconButton(
+                    onClick = { historyOpen = true },
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(top = 6.dp, start = 6.dp)
+                        .zIndex(2000f)
+                        .size(36.dp)
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize().padding(9.dp)) {
+                        val w = size.width
+                        val h = size.height
+                        val stroke = 2.6f
+                        val y1 = h * 0.25f
+                        val y2 = h * 0.50f
+                        val y3 = h * 0.75f
+                        drawLine(
+                            color = iconColor,
+                            start = androidx.compose.ui.geometry.Offset(0f, y1),
+                            end = androidx.compose.ui.geometry.Offset(w, y1),
+                            strokeWidth = stroke
+                        )
+                        drawLine(
+                            color = iconColor,
+                            start = androidx.compose.ui.geometry.Offset(0f, y2),
+                            end = androidx.compose.ui.geometry.Offset(w, y2),
+                            strokeWidth = stroke
+                        )
+                        drawLine(
+                            color = iconColor,
+                            start = androidx.compose.ui.geometry.Offset(0f, y3),
+                            end = androidx.compose.ui.geometry.Offset(w, y3),
+                            strokeWidth = stroke
+                        )
+                    }
+                }
+            }
+
+            // Exit fullscreen toggle (dash) stays upper-right (only shown in fullscreen).
+            if (chatFullscreen) {
+                FilledIconButton(
+                    onClick = {
+                        // Closing fullscreen should also close the drawer.
+                        historyOpen = false
+                        chatFullscreen = false
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 6.dp, end = 6.dp)
+                        .zIndex(2000f)
+                        .size(36.dp)
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize().padding(9.dp)) {
+                        val stroke = 2.8f
+                        val pad = 1.2f
+                        // dash
+                        drawLine(
+                            color = iconColor,
+                            start = androidx.compose.ui.geometry.Offset(pad, size.height / 2f),
+                            end = androidx.compose.ui.geometry.Offset(size.width - pad, size.height / 2f),
+                            strokeWidth = stroke
+                        )
+                    }
+                }
+            }
+
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 reverseLayout = true,
                 // Ensure older messages (top) aren't hidden under the vine overlay.
-                contentPadding = PaddingValues(top = vineHeight)
+                contentPadding = PaddingValues(top = if (chatFullscreen) 0.dp else vineHeight)
             ) {
             // Grocery scan actions (shown inline under the most recent message)
             state.pendingGrocery?.let { _ ->
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        horizontalArrangement = Arrangement.Center
                     ) {
-                        Button(
-                            onClick = onConfirmGroceryAdd,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Add")
-                        }
-                        OutlinedButton(
-                            onClick = onDiscardGrocery,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Leave")
+                        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+                            AlphaHitImageButton(
+                                resId = R.drawable.btn_add,
+                                // ~15% smaller than 170x64
+                                size = DpSize(width = 145.dp, height = 54.dp),
+                                contentDescription = "Add",
+                                enabled = !state.isProcessing,
+                                onClick = onConfirmGroceryAdd
+                            )
                         }
                     }
                 }
@@ -1075,7 +1536,7 @@ fun HomeScreen(
             items(state.messages.reversed()) { msg ->
                 val isAi = msg.sender == MessageSender.AI
                 val isRecipe = isAi && msg.kind == "RECIPE"
-                val isSaved = isRecipe && state.savedRecipes.any { it.id == msg.id }
+                val isSaved = isRecipe && state.savedRecipes.any { it.id == msg.id || it.sourceMessageId == msg.id }
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = if (isAi) Alignment.Start else Alignment.End
@@ -1084,7 +1545,6 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = if (isAi) Arrangement.Start else Arrangement.End
                     ) {
-                        val annotated = MarkdownLite.toAnnotatedString(msg.text)
                         val bubbleColor = if (isAi) Color(0xFF0BEE3F) else Color(0xFFBD1CDD)
                         // Subtle fade across the bubble (gradient).
                         val bubbleBrush = if (isAi) {
@@ -1105,19 +1565,48 @@ fun HomeScreen(
                             )
                         }
                         val bubbleTextColor = if (isAi) Color(0xFF111111) else Color(0xFFFFFFFF)
-                        Text(
-                            text = annotated,
-                            modifier = Modifier
-                                .fillMaxWidth(0.84f)
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(bubbleBrush)
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            color = bubbleTextColor,
-                            style = MaterialTheme.typography.bodyMedium.copy(
-                                fontSize = fontSp.sp,
-                                lineHeight = (fontSp * 1.25f).sp
+                        val bubbleModifier = Modifier
+                            .fillMaxWidth(0.84f)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(bubbleBrush)
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+
+                        if (isRecipe) {
+                            // Chat recipe view: show plain text only (no food icons).
+                            val annotated = MarkdownLite.toAnnotatedString(msg.text)
+                            Text(
+                                text = annotated,
+                                modifier = bubbleModifier,
+                                color = bubbleTextColor,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontSize = fontSp.sp,
+                                    lineHeight = (fontSp * 1.25f).sp
+                                )
                             )
-                        )
+                        } else {
+                            if (isAi) {
+                                TypewriterAiText(
+                                    messageId = msg.id,
+                                    fullText = msg.text,
+                                    typedDoneIds = typedAiDoneIds,
+                                    wpm = 4000,
+                                    modifier = bubbleModifier,
+                                    color = bubbleTextColor,
+                                    fontSp = fontSp
+                                )
+                            } else {
+                                val annotated = MarkdownLite.toAnnotatedString(msg.text)
+                                Text(
+                                    text = annotated,
+                                    modifier = bubbleModifier,
+                                    color = bubbleTextColor,
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontSize = fontSp.sp,
+                                        lineHeight = (fontSp * 1.25f).sp
+                                    )
+                                )
+                            }
+                        }
                     }
 
                     if (isRecipe) {
@@ -1188,8 +1677,33 @@ fun HomeScreen(
         }
 
         // Vine overlay: full-width, above everything, positioned to sit right on top of the chat box.
-        if (chatTopPx > 0) {
-            val vineScaleX = 1.2f
+        if (!chatFullscreen && chatTopPx > 0) {
+            // Enter fullscreen toggle (square) needs to be ABOVE the vine, so render it at the top level.
+            FilledIconButton(
+                onClick = { chatFullscreen = true },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    // Place at the top-right corner of the chat box (same spot it used to be),
+                    // but as a top-level overlay so it can appear above the vine.
+                    .offset { IntOffset(x = 0, y = chatTopPx) }
+                    .padding(top = 6.dp, end = 6.dp)
+                    .zIndex(5000f)
+                    .size(36.dp)
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize().padding(9.dp)) {
+                    val stroke = 2.8f
+                    val pad = 1.2f
+                    drawRect(
+                        color = Color.Black,
+                        topLeft = androidx.compose.ui.geometry.Offset(pad, pad),
+                        size = androidx.compose.ui.geometry.Size(size.width - 2 * pad, size.height - 2 * pad),
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke)
+                    )
+                }
+            }
+
+            // ~10% wider than before
+            val vineScaleX = 1.32f
             val vineScaleY = 4f // ~2x more than the previous 1.18f
             val liftPx = with(density) { 16.dp.toPx() }.toInt()
             // Nudge down by ~0.75x the button icon height (icons are ~44dp).
@@ -1202,11 +1716,397 @@ fun HomeScreen(
                     .fillMaxWidth()
                     .height(vineHeight)
                     // Anchor near the chat's top edge so it "rests" on the chat box.
-                    .offset { IntOffset(x = 0, y = chatTopPx - liftPx + downPx) }
+                    .offset {
+                        // Relative nudge: +5px X and +10px Y from the previous tweak.
+                        val dx = with(density) { (-5).dp.toPx() }.toInt()
+                        // Move up by ~30px (negative Y).
+                        val dy = with(density) { (-10).dp.toPx() }.toInt()
+                        IntOffset(x = dx, y = chatTopPx - liftPx + downPx + dy)
+                    }
                     // Stretch a bit more left/right AND top/bottom visually
                     .graphicsLayer(scaleX = vineScaleX, scaleY = vineScaleY),
                 contentScale = ContentScale.FillBounds,
-                alpha = 0.75f
+                alpha = 1f
+            )
+        }
+    }
+
+    if (showGeneratePopup) {
+        val profile = state.profile
+        val hasIngredients = remember(profile?.foodItems) {
+            profile?.foodItems.orEmpty().any { item ->
+                item.categories.any { c -> c.trim().uppercase() == "INGREDIENT" }
+            }
+        }
+        val candidates = remember(profile?.foodItems) {
+            val list = profile?.foodItems.orEmpty()
+                .filter { item ->
+                    item.categories.any { c ->
+                        val u = c.trim().uppercase()
+                        u == "INGREDIENT" || u == "SNACK"
+                    }
+                }
+                .mapNotNull { it.name.trim().ifBlank { null } }
+                .distinctBy { it.lowercase() }
+                .sortedBy { it.lowercase() }
+            list
+        }
+
+        GenerateRecipePopup(
+            candidates = candidates,
+            showEmptyIngredientsMessage = !hasIngredients,
+            requiredSelections = requiredSelections,
+            resolveIcon = { name -> FoodIconResolver.resolveFoodIconResId(context, name, allowFuzzy = true) },
+            enabled = !state.isProcessing,
+            onDismiss = { showGeneratePopup = false },
+            onGenerate = { required ->
+                showGeneratePopup = false
+                onGenerateMeal(required)
+            }
+        )
+    }
+}
+
+@Composable
+private fun GenerateRecipePopup(
+    candidates: List<String>,
+    showEmptyIngredientsMessage: Boolean,
+    requiredSelections: MutableList<String>,
+    resolveIcon: (String) -> Int?,
+    enabled: Boolean,
+    onDismiss: () -> Unit,
+    onGenerate: (List<String>) -> Unit
+) {
+    var expandedIndex by remember { mutableStateOf<Int?>(null) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            tonalElevation = 8.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+                    .navigationBarsPadding()
+            ) {
+                Text("Generate recipe", fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(12.dp))
+
+                if (showEmptyIngredientsMessage) {
+                    Text(
+                        "Your ingredients list is empty.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+
+                val maxBoxes = 3
+                val boxCount = kotlin.math.min(maxBoxes, kotlin.math.max(1, requiredSelections.size + 1))
+                for (i in 0 until boxCount) {
+                    val current = requiredSelections.getOrNull(i).orEmpty()
+                    val canRemove = i < requiredSelections.size
+
+                    IngredientDropdownField(
+                        label = "Include ingredient (optional)",
+                        value = current,
+                        placeholder = "Optional",
+                        candidates = candidates,
+                        selectedOther = requiredSelections.filterIndexed { idx, _ -> idx != i }.toSet(),
+                        expanded = expandedIndex == i,
+                        onExpandedChange = { open -> expandedIndex = if (open) i else null },
+                        resolveIcon = resolveIcon,
+                        onSelect = { picked ->
+                            if (i < requiredSelections.size) requiredSelections[i] = picked else requiredSelections.add(picked)
+                            expandedIndex = null
+                        },
+                        onClear = if (canRemove) {
+                            {
+                                if (i < requiredSelections.size) {
+                                    requiredSelections.removeAt(i)
+                                    if (expandedIndex == i) expandedIndex = null
+                                }
+                            }
+                        } else null
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                HoldToActivateTextButton(
+                    text = "Generate Recipe (hold)",
+                    iconResId = R.drawable.salad,
+                    iconSize = 44.dp,
+                    enabled = enabled,
+                    holdMillis = 900L,
+                    onActivate = {
+                        val required = requiredSelections
+                            .map { it.trim() }
+                            .filter { it.isNotBlank() }
+                            .distinctBy { it.lowercase() }
+                            .take(6)
+                        onGenerate(required)
+                    },
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun IngredientDropdownField(
+    label: String,
+    value: String,
+    placeholder: String,
+    candidates: List<String>,
+    selectedOther: Set<String>,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    resolveIcon: (String) -> Int?,
+    onSelect: (String) -> Unit,
+    onClear: (() -> Unit)?
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(modifier = Modifier.weight(1f)) {
+                val interactionSource = remember { MutableInteractionSource() }
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = {},
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = true,
+                        readOnly = true,
+                        singleLine = true,
+                        placeholder = { Text(placeholder) }
+                    )
+                    // Transparent overlay: OutlinedTextField can swallow clicks, so force-open the menu.
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .clickable(
+                                interactionSource = interactionSource,
+                                indication = null
+                            ) { onExpandedChange(true) }
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { onExpandedChange(false) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val filtered = candidates.filter { it !in selectedOther }
+                    if (filtered.isEmpty()) {
+                        DropdownMenuItem(
+                            text = { Text("No items found") },
+                            onClick = { onExpandedChange(false) },
+                            enabled = false
+                        )
+                    } else {
+                        filtered.forEach { name ->
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        val iconId = resolveIcon(name)
+                                        if (iconId != null) {
+                                            Image(
+                                                painter = painterResource(id = iconId),
+                                                contentDescription = null,
+                                                modifier = Modifier.size(22.dp),
+                                                contentScale = ContentScale.Fit
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                        } else {
+                                            Spacer(modifier = Modifier.width(30.dp))
+                                        }
+                                        Text(name)
+                                    }
+                                },
+                                onClick = { onSelect(name) }
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (onClear != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                TextButton(onClick = onClear) { Text("X") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TypewriterAiText(
+    messageId: String,
+    fullText: String,
+    typedDoneIds: MutableList<String>,
+    wpm: Int,
+    modifier: Modifier,
+    color: Color,
+    fontSp: Float
+) {
+    // Skip animation for very long messages to avoid "forever typing" (e.g., recipes already handled elsewhere).
+    // Keep it simple: only animate if it's not too large.
+    val shouldAnimate = fullText.length <= 2200
+    val isDone = !shouldAnimate || typedDoneIds.contains(messageId)
+
+    if (isDone) {
+        val annotated = MarkdownLite.toAnnotatedString(fullText)
+        Text(
+            text = annotated,
+            modifier = modifier,
+            color = color,
+            style = MaterialTheme.typography.bodyMedium.copy(
+                fontSize = fontSp.sp,
+                lineHeight = (fontSp * 1.25f).sp
+            )
+        )
+        return
+    }
+
+    var shownChars by remember(messageId) { mutableStateOf(0) }
+    LaunchedEffect(messageId, fullText) {
+        val total = fullText.length
+        shownChars = 0
+
+        // Approximate: ~6 chars per word (5 letters + space).
+        val cps = (wpm * 6f) / 60f
+        val start = System.nanoTime()
+        while (shownChars < total) {
+            withFrameNanos { frameNanos ->
+                val elapsedSec = (frameNanos - start).toDouble() / 1_000_000_000.0
+                val target = (elapsedSec * cps).toInt().coerceIn(0, total)
+                shownChars = target
+            }
+        }
+        if (!typedDoneIds.contains(messageId)) typedDoneIds.add(messageId)
+    }
+
+    Text(
+        text = fullText.take(shownChars),
+        modifier = modifier,
+        color = color,
+        style = MaterialTheme.typography.bodyMedium.copy(
+            fontSize = fontSp.sp,
+            lineHeight = (fontSp * 1.25f).sp
+        )
+    )
+}
+
+@Composable
+private fun HoldToActivateTextButton(
+    text: String,
+    iconResId: Int,
+    iconSize: Dp,
+    enabled: Boolean,
+    holdMillis: Long,
+    onActivate: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val scope = rememberCoroutineScope()
+    val progress = remember { Animatable(0f) }
+    var isHolding by remember { mutableStateOf(false) }
+    var activatedThisHold by remember { mutableStateOf(false) }
+
+    // Mirror TextButton visuals (no container).
+    val contentColor = if (enabled) MaterialTheme.colorScheme.onBackground else MaterialTheme.colorScheme.onSurfaceVariant
+
+    Row(
+        modifier = modifier
+            .alpha(if (enabled) 1f else 0.55f)
+            .pointerInput(enabled, holdMillis) {
+                if (!enabled) return@pointerInput
+                detectTapGestures(
+                    onPress = {
+                        isHolding = true
+                        activatedThisHold = false
+                        // Restart animation each press.
+                        var job: Job? = null
+                        job = scope.launch {
+                            progress.snapTo(0f)
+                            progress.animateTo(
+                                1f,
+                                animationSpec = tween(
+                                    durationMillis = holdMillis.toInt().coerceAtLeast(150),
+                                    easing = LinearEasing
+                                )
+                            )
+                            if (isHolding && !activatedThisHold) {
+                                activatedThisHold = true
+                                onActivate()
+                            }
+                        }
+
+                        val released = tryAwaitRelease()
+                        isHolding = false
+                        // Cancel animation if user released early.
+                        if (!activatedThisHold) {
+                            job?.cancel()
+                        }
+                        // Reset ring quickly after release (whether activated or not).
+                        runCatching {
+                            job?.cancelAndJoin()
+                        }
+                        progress.snapTo(0f)
+                    }
+                )
+            }
+            .padding(horizontal = 10.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(text, color = contentColor)
+
+        // Icon + clockwise hold ring.
+        Box(
+            modifier = Modifier.size(iconSize),
+            contentAlignment = Alignment.Center
+        ) {
+            // Progress ring (only visible while holding / progressing).
+            val ringAlpha = if (isHolding) 1f else 0f
+            Canvas(modifier = Modifier.matchParentSize().alpha(ringAlpha)) {
+                val stroke = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
+                val inset = stroke.width / 2f
+                val arcSize = Size(size.width - inset * 2, size.height - inset * 2)
+                val topLeft = Offset(inset, inset)
+                // faint track
+                drawArc(
+                    color = contentColor.copy(alpha = 0.25f),
+                    startAngle = -90f,
+                    sweepAngle = 360f,
+                    useCenter = false,
+                    topLeft = topLeft,
+                    size = arcSize,
+                    style = stroke
+                )
+                // progress
+                drawArc(
+                    color = contentColor.copy(alpha = 0.95f),
+                    startAngle = -90f,
+                    sweepAngle = progress.value.coerceIn(0f, 1f) * 360f,
+                    useCenter = false,
+                    topLeft = topLeft,
+                    size = arcSize,
+                    style = stroke
+                )
+            }
+
+            Image(
+                painter = painterResource(id = iconResId),
+                contentDescription = null,
+                modifier = Modifier.matchParentSize(),
+                contentScale = ContentScale.Fit
             )
         }
     }

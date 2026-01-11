@@ -46,6 +46,12 @@ data class CheckInRequest(
     val mealText: String? = null,
     // Menu scan support (mode="menu_scan")
     val menuPhotoUrl: String? = null,
+    // Recipe de-duplication support (mode="generate_meal")
+    val existingRecipeTitles: List<String>? = null,
+    // Recipe constraints (mode="generate_meal")
+    val requiredIngredients: List<String>? = null,
+    // Chat continuity support (mode="freeform")
+    val chatContext: String? = null,
     // Batch food name analysis (mode="analyze_food_batch")
     val foodNames: List<String>? = null
 )

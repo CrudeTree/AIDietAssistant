@@ -23,8 +23,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -159,6 +163,12 @@ fun GroceryScanPhotoScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Box(modifier = Modifier.fillMaxWidth()) {
+                IconButton(
+                    onClick = onCancel,
+                    modifier = Modifier.align(Alignment.CenterStart)
+                ) {
+                    Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back")
+                }
                 Image(
                     painter = painterResource(id = R.drawable.header_grocery_scan),
                     contentDescription = "Grocery scan",

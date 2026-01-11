@@ -205,7 +205,9 @@ private fun buildAnnotatedWithIcons(
             // Insert the original matched text, then the icon (kids-book style).
             val key = "ingIcon_${counter++}_${h.resId}"
             append(original.substring(h.start, h.end))
-            append(" ")
+            // Keep the icon glued to the preceding word/phrase so it doesn't wrap onto the next line alone.
+            // (This prevents cases where the icon appears to belong to the next line/section.)
+            append("\u00A0")
             appendInlineContent(key, alternateText = "•")
 
             inline[key] = InlineTextContent(

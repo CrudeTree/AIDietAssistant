@@ -10,6 +10,8 @@ import com.revenuecat.purchases.Purchases
 import com.revenuecat.purchases.PurchasesError
 import com.revenuecat.purchases.getCustomerInfoWith
 import com.revenuecat.purchases.getOfferingsWith
+import com.revenuecat.purchases.logInWith
+import com.revenuecat.purchases.logOutWith
 import com.revenuecat.purchases.purchasePackageWith
 import com.revenuecat.purchases.restorePurchasesWith
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -75,6 +77,51 @@ class RevenueCatRepository {
         )
     }
 
+    /**
+     * Link RevenueCat's current (possibly anonymous/device) user to a stable app user id.
+     *
+     * We use Firebase Auth uid as the canonical app user id so:
+     * - client UI reflects the same subscription the server verifies
+     * - subscription tier can be safely enforced server-side
+     */
+    fun logIn(appUserId: String) {
+        val p = purchasesOrNull()
+        if (p == null) {
+            _events.tryEmit(
+                RevenueCatEvent.Error(
+                    "Subscriptions unavailable: RevenueCat is not configured on this build (missing REVENUECAT_API_KEY)."
+                )
+            )
+            return
+        }
+
+        p.logInWith(
+            appUserID = appUserId,
+            onError = { err -> _events.tryEmit(RevenueCatEvent.Error(err.safeMessage())) },
+            // Signature in Purchases SDK 9.x: (CustomerInfo, created: Boolean)
+            onSuccess = { info, _ ->
+                _customerInfo.value = info
+                _events.tryEmit(RevenueCatEvent.TierUpdated(tierFrom(info)))
+
+                // Important on Android: after switching users, pull any existing Play Store
+                // subscriptions into this RevenueCat app user. This fixes cases where Google Play
+                // says "already subscribed" but CustomerInfo shows Free.
+                restore()
+            }
+        )
+    }
+
+    fun logOut() {
+        val p = purchasesOrNull() ?: return
+        p.logOutWith(
+            onError = { err -> _events.tryEmit(RevenueCatEvent.Error(err.safeMessage())) },
+            onSuccess = { info ->
+                _customerInfo.value = info
+                _events.tryEmit(RevenueCatEvent.TierUpdated(tierFrom(info)))
+            }
+        )
+    }
+
     fun purchase(activity: Activity, pkg: Package) {
         val p = purchasesOrNull()
         if (p == null) {
@@ -120,16 +167,61 @@ class RevenueCatRepository {
     }
 
     fun tierFrom(customerInfo: CustomerInfo): SubscriptionTier {
-        val active = customerInfo.entitlements.active
-        return when {
-            active["premium"] != null -> SubscriptionTier.PRO
-            active["basic"] != null -> SubscriptionTier.REGULAR
-            else -> SubscriptionTier.FREE
+        val activeEntitlements = customerInfo.entitlements.active
+        val activeKeys = activeEntitlements.keys.map { it.lowercase() }
+
+        // Primary: map entitlements. We *prefer* entitlements, but we shouldn't depend on exact IDs
+        // ("basic"/"premium") because dashboards often evolve (e.g. "basic_plan", "premium_v2", etc.).
+        val hasPremiumEntitlement = activeKeys.any { k ->
+            k == "premium" || k.contains("premium") || k == "pro" || k.contains("pro")
         }
+        if (hasPremiumEntitlement) return SubscriptionTier.PRO
+
+        val hasBasicEntitlement = activeKeys.any { k ->
+            k == "basic" || k.contains("basic") || k == "regular" || k.contains("regular")
+        }
+        if (hasBasicEntitlement) return SubscriptionTier.REGULAR
+
+        // Fallback: infer from active subscription product IDs (store product ids).
+        // This helps when entitlements were not set up correctly but products are active.
+        val activeProducts = customerInfo.activeSubscriptions.map { it.lowercase() }
+        val hasPremiumProduct = activeProducts.any { p ->
+            p.contains("premium") || (p.contains("pro") && !p.contains("profile"))
+        }
+        if (hasPremiumProduct) return SubscriptionTier.PRO
+
+        val hasBasicProduct = activeProducts.any { p ->
+            p.contains("basic") || p.contains("regular")
+        }
+        if (hasBasicProduct) return SubscriptionTier.REGULAR
+
+        return SubscriptionTier.FREE
     }
 
     fun currentOffering(): Offering? = offerings.value?.current
 }
 
 private fun PurchasesError.safeMessage(): String =
-    this.message.takeIf { it.isNotBlank() } ?: "RevenueCat error"
+    buildString {
+        // Include the SDK error code so BillingClient/Google Play errors are diagnosable.
+        // Example codes: PurchaseCancelledError, StoreProblemError, StoreProductNotAvailableError, etc.
+        append("RevenueCat: ")
+        append(runCatching { code.name }.getOrNull() ?: "Error")
+
+        val msg = message.takeIf { it.isNotBlank() }
+        if (msg != null) {
+            append(": ")
+            append(msg)
+        }
+
+        // Some SDK versions expose an "underlyingErrorMessage" which can include Play Billing details.
+        val underlying = runCatching {
+            val f = this::class.java.methods.firstOrNull { it.name == "getUnderlyingErrorMessage" }
+            (f?.invoke(this) as? String)?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+        if (!underlying.isNullOrBlank() && underlying != msg) {
+            append(" (")
+            append(underlying)
+            append(")")
+        }
+    }

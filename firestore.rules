@@ -1,0 +1,71 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    // Default: lock everything down.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // User profile + user-owned subcollections.
+    match /users/{userId} {
+      allow create: if isOwner(userId);
+      allow read: if isOwner(userId);
+
+      // Users can update their profile, but must NOT be able to modify server-managed fields.
+      // Server-managed fields: subscriptionTier
+      allow update: if isOwner(userId)
+        && request.resource.data.subscriptionTier == resource.data.subscriptionTier;
+
+      // Allow the user to delete their own profile document (note: subcollections won't be deleted automatically).
+      allow delete: if isOwner(userId);
+
+      // Server-enforced quota counters: client must NOT be able to edit/reset these.
+      match /meta/usageDaily/{docId} {
+        allow read, write: if false;
+        match /{subpath=**} {
+          allow read, write: if false;
+        }
+      }
+
+      // Legacy + misc user-owned meta docs (e.g. meta/messageLog used for backward compatibility).
+      // Safe because we still explicitly deny meta/usageDaily/** above.
+      match /meta/{metaDocId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // Chat sessions + message logs (user-owned).
+      match /chats/{chatId} {
+        allow read, write: if isOwner(userId);
+        match /meta/{metaDocId} {
+          allow read, write: if isOwner(userId);
+        }
+      }
+
+      // Schedules (user-owned).
+      match /schedules/{dayId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // Saved recipes (user-owned).
+      match /recipes/{recipeId} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+
+    // Shared food catalog cache used by Cloud Functions.
+    // Clients should not read/write this directly.
+    match /foodCatalog/{docId} {
+      allow read, write: if false;
+    }
+  }
+}
+
+

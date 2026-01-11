@@ -22,9 +22,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -43,7 +48,11 @@ fun RecipeDetailScreen(
     onBack: () -> Unit
 ) {
     val ctx = LocalContext.current
-    val showIcons = profile.showFoodIcons
+    // Temporary per-screen toggle. Defaults to Settings each time you open this screen.
+    var showIcons by remember { mutableStateOf(profile.showFoodIcons) }
+    LaunchedEffect(recipe.id) {
+        showIcons = profile.showFoodIcons
+    }
     val fontSp = profile.uiFontSizeSp.coerceIn(12f, 40f)
 
     val userHasIconIds = remember(profile.foodItems) {
@@ -77,12 +86,20 @@ fun RecipeDetailScreen(
                 IconButton(onClick = onBack) {
                     Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back")
                 }
-                Text(
-                    text = recipe.title.ifBlank { "Recipe" },
-                    style = MaterialTheme.typography.headlineSmall.copy(fontSize = (fontSp + 6f).coerceAtMost(46f).sp),
-                    fontWeight = FontWeight.Bold
+                Spacer(modifier = Modifier.weight(1f))
+
+                // Temporary toggle: does not persist; resets to Settings after leaving this screen.
+                Switch(
+                    checked = showIcons,
+                    onCheckedChange = { showIcons = it }
                 )
             }
+
+            Text(
+                text = recipe.title.ifBlank { "Recipe" },
+                style = MaterialTheme.typography.headlineSmall.copy(fontSize = (fontSp + 6f).coerceAtMost(46f).sp),
+                fontWeight = FontWeight.Bold
+            )
 
             if (showIcons && have.isNotEmpty()) {
                 Row(

@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.combinedClickable
@@ -22,13 +24,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,6 +44,9 @@ import com.matchpoint.myaidietapp.model.FoodItem
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
 import com.matchpoint.myaidietapp.R
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -64,11 +69,18 @@ fun FoodListScreen(
     var editIngredient by remember { mutableStateOf(false) }
     var editSnack by remember { mutableStateOf(false) }
     var showAddChooser by remember { mutableStateOf(false) }
+    // Toggle to show/hide per-item descriptive lines for easier scanning.
+    var showDescriptions by rememberSaveable(filterCategory) { mutableStateOf(true) }
+    // Toggle to sort the current list alphabetically by name.
+    var alphabetize by rememberSaveable(filterCategory) { mutableStateOf(false) }
 
     Surface {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                // Keep bottom rows above the system nav/gesture bar and keyboard.
+                .navigationBarsPadding()
+                .imePadding()
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -85,6 +97,12 @@ fun FoodListScreen(
                 else -> "All items"
             }
             Box(modifier = Modifier.fillMaxWidth()) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier.align(Alignment.CenterStart)
+                ) {
+                    Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back")
+                }
                 if (headerResId != null) {
                     Image(
                         painter = painterResource(id = headerResId),
@@ -109,9 +127,17 @@ fun FoodListScreen(
                         // On category pages, show Text/Photos choice; on "All items", go to Add Food hub.
                         if (filterCategory.isNullOrBlank()) onOpenAddFoodHub() else showAddChooser = true
                     },
-                    modifier = Modifier.align(Alignment.CenterEnd)
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .size(56.dp)
                 ) {
-                    Icon(imageVector = Icons.Filled.Add, contentDescription = "Add")
+                    Image(
+                        painter = painterResource(id = R.drawable.plus_sign),
+                        contentDescription = "Add",
+                        // Keep the tap target large but shrink the visual by ~50%.
+                        modifier = Modifier.size(28.dp),
+                        contentScale = ContentScale.Fit
+                    )
                 }
             }
 
@@ -136,6 +162,39 @@ fun FoodListScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
+            // Toggle: Show/hide descriptions (use-as, nutrition, ingredients, notes)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Show descriptions",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Switch(
+                    checked = showDescriptions,
+                    onCheckedChange = { showDescriptions = it }
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Alphabetize (A–Z)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Switch(
+                    checked = alphabetize,
+                    onCheckedChange = { alphabetize = it }
+                )
+            }
+
             val filtered = if (filterCategory.isNullOrBlank()) {
                 items
             } else {
@@ -143,7 +202,13 @@ fun FoodListScreen(
                 items.filter { (it.categories.map { c -> c.trim().uppercase() }.toSet().ifEmpty { setOf("SNACK") }).contains(key) }
             }
 
-            if (filtered.isEmpty()) {
+            val displayList = if (!alphabetize) {
+                filtered
+            } else {
+                filtered.sortedWith(compareBy<FoodItem> { it.name.trim().lowercase() }.thenBy { it.id })
+            }
+
+            if (displayList.isEmpty()) {
                 Text(
                     text = "No foods yet.",
                     style = MaterialTheme.typography.bodyMedium,
@@ -158,13 +223,14 @@ fun FoodListScreen(
                     .weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(filtered) { item ->
+                items(displayList) { item ->
                     val context = LocalContext.current
                     val iconResId = remember(item.name) {
                         FoodIconResolver.resolveFoodIconResId(context, item.name)
                     }
                     val fs = fontSizeSp.coerceIn(12f, 40f)
-                    val iconDp = (fs * 2.0f).coerceIn(24f, 64f).dp
+                    // Make list icons ~1.5x larger.
+                    val iconDp = (fs * 3.0f).coerceIn(24f, 96f).dp
                     val healthRating = item.rating
                     val dietFitRating = item.dietRatings[dietType.name] ?: item.dietFitRating
 
@@ -172,15 +238,17 @@ fun FoodListScreen(
                         healthRating == null -> MaterialTheme.colorScheme.onSurfaceVariant
                         healthRating <= 3 -> Color(0xFFB00020)
                         healthRating <= 6 -> Color(0xFFFFC107)
-                        healthRating <= 9 -> Color(0xFF4CAF50)
-                        else -> Color(0xFF1B5E20)
+                        // Make 8–9/10 a more yellow-green; make 10/10 the prior light green.
+                        healthRating <= 9 -> Color(0xFFCDDC39)
+                        else -> Color(0xFF4CAF50)
                     }
                     val dietColor = when {
                         dietFitRating == null -> MaterialTheme.colorScheme.onSurfaceVariant
                         dietFitRating <= 3 -> Color(0xFFB00020)
                         dietFitRating <= 6 -> Color(0xFFFFC107)
-                        dietFitRating <= 9 -> Color(0xFF4CAF50)
-                        else -> Color(0xFF1B5E20)
+                        // Make 8–9/10 a more yellow-green; make 10/10 the prior light green.
+                        dietFitRating <= 9 -> Color(0xFFCDDC39)
+                        else -> Color(0xFF4CAF50)
                     }
 
                     Column(
@@ -217,11 +285,6 @@ fun FoodListScreen(
                                 modifier = Modifier.weight(1f),
                                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = fs.sp)
                             )
-                            Text(
-                                text = "x${item.quantity}",
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(end = 8.dp)
-                            )
                             Column(horizontalAlignment = Alignment.End) {
                                 Text(
                                     text = "Health ${healthRating?.let { "$it/10" } ?: "-/10"}",
@@ -236,10 +299,16 @@ fun FoodListScreen(
                                     )
                                 }
                             }
-                            Button(onClick = { onRemoveFood(item.id) }) {
-                                Text("X")
-                            }
+                            AlphaHitImageButton(
+                                resId = R.drawable.remove,
+                                size = DpSize(width = 44.dp, height = 44.dp),
+                                contentDescription = "Remove",
+                                enabled = true,
+                                onClick = { onRemoveFood(item.id) }
+                            )
                         }
+
+                        if (!showDescriptions) return@items
 
                             val cats = item.categories.map { it.trim().uppercase() }.toSet().ifEmpty { setOf("SNACK") }
                             Text(

@@ -1,5 +1,6 @@
 package com.matchpoint.myaidietapp.ui
 
+import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,10 +19,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -31,10 +37,18 @@ fun AuthScreen(
     onSignIn: (email: String, password: String) -> Unit,
     onCreateAccount: (email: String, password: String) -> Unit
 ) {
+    val context = LocalContext.current
+    val prefs = remember(context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    }
+
     var isCreateMode by remember { mutableStateOf(false) }
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var confirm by remember { mutableStateOf("") }
+    // Remember the last email so logging out/in isn't annoying.
+    var email by rememberSaveable {
+        mutableStateOf(prefs.getString(KEY_LAST_EMAIL, "") ?: "")
+    }
+    var password by rememberSaveable { mutableStateOf("") }
+    var confirm by rememberSaveable { mutableStateOf("") }
 
     val canSubmit = email.isNotBlank() && password.length >= 6 &&
         (!isCreateMode || password == confirm) &&
@@ -65,7 +79,11 @@ fun AuthScreen(
                 onValueChange = { email = it.trim() },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Email") },
-                singleLine = true
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Email,
+                    imeAction = ImeAction.Next
+                )
             )
             OutlinedTextField(
                 value = password,
@@ -73,7 +91,11 @@ fun AuthScreen(
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Password (min 6 chars)") },
                 singleLine = true,
-                visualTransformation = PasswordVisualTransformation()
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Password,
+                    imeAction = if (isCreateMode) ImeAction.Next else ImeAction.Done
+                )
             )
             if (isCreateMode) {
                 OutlinedTextField(
@@ -82,7 +104,11 @@ fun AuthScreen(
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Confirm password") },
                     singleLine = true,
-                    visualTransformation = PasswordVisualTransformation()
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        imeAction = ImeAction.Done
+                    )
                 )
             }
 
@@ -96,6 +122,8 @@ fun AuthScreen(
 
             Button(
                 onClick = {
+                    // Save last email (never store passwords).
+                    prefs.edit().putString(KEY_LAST_EMAIL, email.trim()).apply()
                     if (isCreateMode) onCreateAccount(email, password) else onSignIn(email, password)
                 },
                 enabled = canSubmit,
@@ -116,6 +144,9 @@ fun AuthScreen(
         }
     }
 }
+
+private const val PREFS = "auth_prefs"
+private const val KEY_LAST_EMAIL = "last_email"
 
 
 

@@ -1,0 +1,36 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    // Default: lock everything down.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // User-owned uploads. These are the folders your app writes to today:
+    // - foodPhotos/{uid}/...
+    // - mealPhotos/{uid}/...
+    // - groceryPhotos/{uid}/...
+    // - menuPhotos/{uid}/...
+    match /foodPhotos/{userId}/{allPaths=**} {
+      allow read, write: if isOwner(userId);
+    }
+    match /mealPhotos/{userId}/{allPaths=**} {
+      allow read, write: if isOwner(userId);
+    }
+    match /groceryPhotos/{userId}/{allPaths=**} {
+      allow read, write: if isOwner(userId);
+    }
+    match /menuPhotos/{userId}/{allPaths=**} {
+      allow read, write: if isOwner(userId);
+    }
+  }
+}
+
+

@@ -162,6 +162,14 @@ functions.http('checkin', async (req, res) => {
       // Menu scan
       menuPhotoUrl,
 
+      // Generate meal: de-dup recipes
+      existingRecipeTitles,
+      // Generate meal: required ingredients (must include)
+      requiredIngredients,
+
+      // Freeform chat: continuity
+      chatContext,
+
       // Batch text analysis
       foodNames
     } = req.body || {};
@@ -185,10 +193,108 @@ functions.http('checkin', async (req, res) => {
     const db = admin.firestore();
     const FOOD_CACHE_VERSION = 1;
 
-    // Load user profile to determine tier limits (server-side source of truth).
+    // Load user profile (for non-tier fields). Tier is verified server-side via RevenueCat below.
     const userSnap = await db.collection('users').doc(uid).get();
     const user = userSnap.exists ? (userSnap.data() || {}) : {};
-    const tier = String(user.subscriptionTier || 'FREE').toUpperCase();
+
+    async function fetchTierFromRevenueCat(appUserId) {
+      const secret = process.env.REVENUECAT_SECRET_API_KEY || process.env.REVENUECAT_API_KEY_SECRET;
+      if (!secret) return null;
+
+      // RevenueCat V1: GET /v1/subscribers/{app_user_id}
+      // Secret key is from RevenueCat dashboard (NOT the public SDK key).
+      const url = `https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(String(appUserId))}`;
+      const resp = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${secret}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        console.error('RevenueCat verify failed', resp.status, text?.slice?.(0, 220) || text);
+        return null;
+      }
+
+      const data = await resp.json();
+      const sub = data?.subscriber || {};
+      const active = sub?.entitlements?.active || {};
+
+      // Map entitlements expected in RevenueCat dashboard.
+      //
+      // Prefer explicit env-configured entitlement identifiers so different dashboards work without code changes.
+      // Example env:
+      // - RC_ENTITLEMENT_PRO="premium"
+      // - RC_ENTITLEMENT_REGULAR="basic"
+      const proEnt = String(process.env.RC_ENTITLEMENT_PRO || 'premium').trim();
+      const regEnt = String(process.env.RC_ENTITLEMENT_REGULAR || 'basic').trim();
+      if (proEnt && active[proEnt]) return 'PRO';
+      if (regEnt && active[regEnt]) return 'REGULAR';
+
+      // Heuristic fallback: handle common naming variations.
+      const keys = Object.keys(active || {});
+      const keyLower = keys.map((k) => String(k || '').toLowerCase());
+      const hasPro =
+        keyLower.some((k) => k.includes('premium') || k === 'pro' || k.includes('pro_') || k.includes('_pro') || k.includes('plus'));
+      const hasReg =
+        keyLower.some((k) => k.includes('basic') || k.includes('regular') || k.includes('standard'));
+      if (hasPro) return 'PRO';
+      if (hasReg) return 'REGULAR';
+
+      // Fallback: infer from active subscriptions if entitlements aren't configured / present yet.
+      // RevenueCat subscriber payload includes a "subscriptions" map keyed by product identifier.
+      // We'll treat any non-expired subscription as active and map by product id keywords.
+      const subs = sub?.subscriptions && typeof sub.subscriptions === 'object' ? sub.subscriptions : {};
+      const nowMs = Date.now();
+      const activeProductIds = [];
+      for (const [productId, info] of Object.entries(subs || {})) {
+        const expiresMsRaw = info?.expires_date_ms ?? info?.expires_date_ms ?? null;
+        const expiresDateRaw = info?.expires_date ?? null;
+        let expiresMs = null;
+        if (expiresMsRaw !== null && expiresMsRaw !== undefined) {
+          const n = Number(expiresMsRaw);
+          if (Number.isFinite(n)) expiresMs = n;
+        } else if (typeof expiresDateRaw === 'string' && expiresDateRaw.trim()) {
+          const t = Date.parse(expiresDateRaw);
+          if (Number.isFinite(t)) expiresMs = t;
+        }
+        const isActive = expiresMs == null ? false : expiresMs > nowMs;
+        if (isActive) activeProductIds.push(String(productId || ''));
+      }
+      const prodLower = activeProductIds.map((s) => s.toLowerCase());
+      const proByProduct =
+        prodLower.some((p) => p.includes('premium') || p.includes('pro') || p.includes('plan_premium'));
+      const regByProduct =
+        prodLower.some((p) => p.includes('basic') || p.includes('regular') || p.includes('plan_basic'));
+      if (proByProduct) return 'PRO';
+      if (regByProduct) return 'REGULAR';
+
+      return 'FREE';
+    }
+
+    // Server-side tier is the source of truth for quotas.
+    // Fail closed to FREE if RevenueCat secret isn't configured or verification fails.
+    const verifiedTier = (await fetchTierFromRevenueCat(uid)) || 'FREE';
+
+    // Best-effort sync back to Firestore for UI consistency, but never trust it for enforcement.
+    try {
+      const currentTier = String(user.subscriptionTier || 'FREE').toUpperCase();
+      if (currentTier !== verifiedTier) {
+        await db.collection('users').doc(uid).set(
+          {
+            subscriptionTier: verifiedTier,
+            subscriptionTierUpdatedAt: admin.firestore.FieldValue.serverTimestamp()
+          },
+          { merge: true }
+        );
+      }
+    } catch (e) {
+      console.error('Failed to sync subscriptionTier to Firestore', e?.message || e);
+    }
+
+    const tier = verifiedTier;
 
     function dailyChatLimitForTier(t) {
       if (t === 'PRO') return 150;
@@ -270,6 +376,10 @@ functions.http('checkin', async (req, res) => {
                   : 'DAILY_LIMIT_REACHED_PRO';
             const err = new Error(msg);
             err.code = 'LIMIT';
+            err.used = used;
+            err.limit = limit;
+            err.tier = tier;
+            err.dayKey = dayKey;
             throw err;
           }
           tx.set(
@@ -284,7 +394,13 @@ functions.http('checkin', async (req, res) => {
         });
       } catch (e) {
         if (e?.code === 'LIMIT') {
-          return res.status(429).json({ text: 'DAILY_LIMIT_REACHED' });
+          return res.status(429).json({
+            text: 'DAILY_LIMIT_REACHED',
+            tier: String(e?.tier || tier),
+            used: Number.isFinite(Number(e?.used)) ? Number(e.used) : null,
+            limit: Number.isFinite(Number(e?.limit)) ? Number(e.limit) : limit,
+            dayKey: String(e?.dayKey || dayKey)
+          });
         }
         console.error('quota transaction failed', e);
         return res.status(500).json({ text: 'Service unavailable.' });
@@ -361,7 +477,7 @@ functions.http('checkin', async (req, res) => {
         const ok = await tryConsumeAnalysisQuota(1);
         if (!ok) {
           logEvent('analysis_quota_denied', { uid: uidHash, tier, mode: 'analyze_food', cost: 1 });
-          return res.status(429).json({ text: 'DAILY_LIMIT_REACHED' });
+        return res.status(429).json({ text: 'DAILY_LIMIT_REACHED', tier });
         }
         logEvent('analysis_quota_consumed', { uid: uidHash, tier, mode: 'analyze_food', cost: 1 });
       }
@@ -658,7 +774,7 @@ No extra keys. No markdown. No text outside JSON.
           hits: names.length - misses.length,
           misses: misses.length
         });
-        return res.status(429).json({ text: 'DAILY_LIMIT_REACHED' });
+        return res.status(429).json({ text: 'DAILY_LIMIT_REACHED', tier });
       }
       logEvent('analysis_quota_consumed', {
         uid: uidHash,
@@ -833,7 +949,7 @@ Rules:
       const ok = await tryConsumeAnalysisQuota(1);
       if (!ok) {
         logEvent('analysis_quota_denied', { uid: uidHash, tier, mode: 'menu_scan', cost: 1 });
-        return res.status(429).json({ text: 'DAILY_LIMIT_REACHED' });
+        return res.status(429).json({ text: 'DAILY_LIMIT_REACHED', tier });
       }
       logEvent('analysis_quota_consumed', { uid: uidHash, tier, mode: 'menu_scan', cost: 1 });
 
@@ -896,7 +1012,7 @@ Return plain text only. No JSON. Keep it concise and actionable.
       const ok = await tryConsumeAnalysisQuota(1);
       if (!ok) {
         logEvent('analysis_quota_denied', { uid: uidHash, tier, mode: 'analyze_meal', cost: 1 });
-        return res.status(429).json({ text: 'DAILY_LIMIT_REACHED' });
+        return res.status(429).json({ text: 'DAILY_LIMIT_REACHED', tier });
       }
       logEvent('analysis_quota_consumed', { uid: uidHash, tier, mode: 'analyze_meal', cost: 1 });
 
@@ -1001,6 +1117,20 @@ No extra keys. No markdown. No text outside JSON.
       const windowEnd = Number.isFinite(Number(eatingWindowEndMinutes)) ? Math.round(Number(eatingWindowEndMinutes)) : null;
       const preset = normalizeCategory(fastingPreset) || 'NONE';
 
+      const existingTitles = Array.isArray(existingRecipeTitles)
+        ? existingRecipeTitles
+            .map((t) => String(t || '').trim())
+            .filter(Boolean)
+            .slice(0, 30)
+        : [];
+
+      const required = Array.isArray(requiredIngredients)
+        ? requiredIngredients
+            .map((t) => String(t || '').trim())
+            .filter(Boolean)
+            .slice(0, 6)
+        : [];
+
       const instructions = `
 You are a diet assistant. The user wants a MEAL recipe they can cook.
 
@@ -1012,11 +1142,24 @@ Eating window (minutes from midnight): ${windowStart ?? "none"}–${windowEnd ??
 User’s categorized items summary (Meals/Ingredients/Snacks):
 ${safeInventorySummary || "unknown"}
 
+Previously saved recipe titles (avoid duplicates or near-duplicates):
+${existingTitles.length ? existingTitles.map(t => `- ${t}`).join('\n') : "(none)"}
+
+Required ingredients (MUST be included in the recipe):
+${required.length ? required.map(t => `- ${t}`).join('\n') : "(none)"}
+
 Rules:
 - Build meals primarily from INGREDIENTS. You MAY use SNACKS if they can reasonably be used in cooking.
 - Do NOT assume ingredients not listed.
+- Do not use emojis or emoji icons anywhere in the response.
+- If required ingredients are provided, you MUST include ALL of them in:
+  - the Ingredients list, and
+  - the Steps (used in a real way, not as a garnish unless appropriate).
+- If a required ingredient is not available in the user's list, call it out under "Missing / recommended to buy".
 - If ingredients are too sparse to cook (e.g. only salt), say so and provide a small shopping list.
 - If the user is outside their eating window and they ask "can I eat", you may say "not yet" and how long until the window opens.
+- Avoid generating a recipe that matches or closely resembles any previously saved recipe title.
+- If your first idea is too similar, pick a different cuisine, protein, primary carb, and cooking method.
 
 Return plain text (not JSON) with this format:
 
@@ -1099,40 +1242,51 @@ Notes / swaps (only using my list): <short>
       `Weight trend delta: ${weightTrend ?? "unknown"}.`,
       `Minutes since meal (legacy): ${minutesSinceMeal ?? "unknown"}.`,
       `Known foods/inventory: ${safeInventorySummary || "unknown"}.`,
-      `User message: ${safeUserMessage || "none"}.`,
       `Mode: ${mode || "freeform"}.`,
       `Tone hints: ${tone || "short, casual, varied, human, not templated"}.`
     ];
 
     const behavior = `
-You are a general assistant AND a helpful diet-management coach for this app.
+You are a helpful, conversational assistant inside a diet-management app.
 
-IMPORTANT:
-- If the user's message is NOT about food, diet, recipes, grocery/menu choices, fasting/eating window, or this app, answer like a normal assistant. Do NOT bring up eating windows or dieting.
+Core scope:
+- Help the user manage their Foods list, get quick food opinions, and chat about diet/fasting/menus.
+- The app does NOT do calorie counting or track what the user already ate today.
+- Eating window is informational: explain it; don’t command.
 
-This app's scope (be consistent with it):
-- Users set a diet type and optionally an eating window (informational).
-- Users can add foods to their list.
-- You help generate recipes from their list.
-- You can give a quick health/diet-fit opinion on foods (e.g. grocery scan) and help pick menu items (menu scan).
-- The app does NOT do calorie counting and does NOT track what the user already ate today.
-- Do NOT act like you are "in control" of the user or telling them exactly when to eat. If asked about their eating window, explain it and let them decide.
+Conversation:
+- If the message isn’t about food/diet/this app, just answer normally (don’t force diet talk).
+- Keep continuity; interpret “it/that/this” as the most recent food/topic unless unclear.
 
-When user asks for a recipe:
-- Use categorized lists: Meals, Ingredients, Snacks.
-- Build meals primarily from INGREDIENTS (and SNACKS only if they reasonably fit in cooking).
-- If ingredients are too sparse, say what’s missing and suggest a short shopping list.
+Recipes:
+- If the user asks for a recipe/meal to cook, output it in this exact structure so it can be saved:
+  Title: ...
+  Why it fits: ...
+  Ingredients (from my list):
+  - ...
+  Steps:
+  1) ...
+- If (and only if) you are providing a cookable recipe/meal, append this tag at the VERY END:
+  <APP_KIND>RECIPE</APP_KIND>
 
-When user asks “Can I eat?” / timing questions:
-- If there is an eating window, tell them whether they are inside it and the window hours.
-- Keep it informational and supportive (no commanding tone).
-
-Response length:
-- For mode "freeform": keep it short (1–3 sentences) unless the user asks for detail.
-- For mode "generate_meal": handled separately above.
+App actions:
+- Only claim an item was added/saved if you included a valid action block.
+- Do NOT include <APP_ACTION> blocks when generating a recipe unless the user explicitly asked to add something to their list.
+- To add foods, end your message with EXACTLY:
+  <APP_ACTION>{"type":"ADD_FOODS","items":[{"name":"broccoli","category":"INGREDIENT"}]}</APP_ACTION>
+- Users CAN add foods not already in their list. Default category to INGREDIENT if unspecified.
+- JSON must be valid. No extra text inside the tag.
 `.trim();
 
-    const prompt = contextLines.join(" ") + " " + behavior;
+    const prompt = [
+      contextLines.join(" "),
+      "",
+      chatContext ? `Recent conversation (most recent last):\n${truncateText(chatContext, 2000)}` : "Recent conversation: (none)",
+      "",
+      `User message: ${safeUserMessage || "none"}.`,
+      "",
+      behavior
+    ].join("\n");
 
     const chatResp = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
