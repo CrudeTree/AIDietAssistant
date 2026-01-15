@@ -20,6 +20,8 @@ import retrofit2.http.POST
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.tasks.await
 import android.util.Log
+import java.time.LocalDate
+import java.time.ZoneId
 
 data class CheckInRequest(
     val lastMeal: String?,
@@ -39,6 +41,8 @@ data class CheckInRequest(
     val eatingWindowEndMinutes: Int? = null,
     // Optional client time helpers so backend aligns with the phone’s local clock
     val clientLocalMinutes: Int? = null,
+    // YYYY-MM-DD in the user's local timezone (used by backend for daily quota reset)
+    val clientLocalDate: String? = null,
     val timezoneOffsetMinutes: Int? = null,
     // Meal logging support (mode="analyze_meal")
     val mealPhotoUrl: String? = null,
@@ -53,10 +57,35 @@ data class CheckInRequest(
     // Chat continuity support (mode="freeform")
     val chatContext: String? = null,
     // Batch food name analysis (mode="analyze_food_batch")
-    val foodNames: List<String>? = null
+    val foodNames: List<String>? = null,
+    // Daily plan generation (mode="daily_plan")
+    val dailyTargetCalories: Int? = null,
+    val dailyMealCount: Int? = null,
+    val dailySavedRecipesOnly: Boolean? = null,
+    val savedRecipesForPlan: List<SavedRecipeForPlan>? = null
 )
 
 data class CheckInResponse(val text: String)
+
+data class SavedRecipeForPlan(
+    val id: String,
+    val title: String,
+    val text: String? = null
+)
+
+data class DailyPlanResponse(
+    val dailyTargetCalories: Int? = null,
+    val totalEstimatedCalories: Int = 0,
+    val meals: List<DailyPlanMeal> = emptyList()
+)
+
+data class DailyPlanMeal(
+    val id: String = "",
+    val title: String = "",
+    val estimatedCalories: Int = 0,
+    val recipeText: String = "",
+    val sourceRecipeId: String? = null
+)
 
 /**
  * Parsed shape of the JSON inside the `text` field when mode="analyze_food".
@@ -112,6 +141,7 @@ interface CheckInService {
 class OpenAiProxyRepository(
     baseUrl: String = BuildConfig.CHECKIN_PROXY_BASE_URL
 ) {
+    private fun localDayKey(): String = LocalDate.now(ZoneId.systemDefault()).toString()
 
     private val moshi: Moshi = Moshi.Builder()
         .add(KotlinJsonAdapterFactory())
@@ -119,6 +149,7 @@ class OpenAiProxyRepository(
 
     private val analyzeAdapter = moshi.adapter(AnalyzeFoodResponse::class.java)
     private val analyzeMealAdapter = moshi.adapter(AnalyzeMealResponse::class.java)
+    private val dailyPlanAdapter = moshi.adapter(DailyPlanResponse::class.java)
     private val analyzeListAdapter = moshi.adapter<List<AnalyzeFoodResponse>>(
         Types.newParameterizedType(List::class.java, AnalyzeFoodResponse::class.java)
     )
@@ -170,7 +201,12 @@ class OpenAiProxyRepository(
 
     suspend fun generateCheckIn(request: CheckInRequest): String =
         withContext(Dispatchers.IO) {
-            service.checkIn(request).text
+            val enriched = if (request.clientLocalDate.isNullOrBlank()) {
+                request.copy(clientLocalDate = localDayKey())
+            } else {
+                request
+            }
+            service.checkIn(enriched).text
         }
 
     suspend fun analyzeFood(
@@ -191,7 +227,8 @@ class OpenAiProxyRepository(
                 productUrl = productUrl,
                 labelUrl = labelUrl,
                 nutritionFactsUrl = nutritionFactsUrl,
-                dietType = dietType.name
+                dietType = dietType.name,
+                clientLocalDate = localDayKey()
             )
         )
         val raw = response.text
@@ -216,7 +253,8 @@ class OpenAiProxyRepository(
                 inventorySummary = null,
                 productUrl = null,
                 labelUrl = null,
-                dietType = dietType.name
+                dietType = dietType.name,
+                clientLocalDate = localDayKey()
             )
         )
         val raw = response.text
@@ -244,7 +282,8 @@ class OpenAiProxyRepository(
                 mode = "analyze_food_batch",
                 inventorySummary = null,
                 dietType = dietType.name,
-                foodNames = cleaned
+                foodNames = cleaned,
+                clientLocalDate = localDayKey()
             )
         )
         val raw = response.text
@@ -270,7 +309,8 @@ class OpenAiProxyRepository(
                 dietType = dietType.name,
                 mealPhotoUrl = mealPhotoUrl,
                 mealGrams = mealGrams,
-                mealText = mealText
+                mealText = mealText,
+                clientLocalDate = localDayKey()
             )
         )
         val raw = response.text
@@ -297,8 +337,60 @@ class OpenAiProxyRepository(
                 inventorySummary = inventorySummary,
                 dietType = dietType.name,
                 menuPhotoUrl = menuPhotoUrl,
-                userMessage = "Scan this restaurant menu photo and recommend the best choices for my diet."
+                userMessage = "Scan this restaurant menu photo and recommend the best choices for my diet.",
+                clientLocalDate = localDayKey()
             )
         ).text
+    }
+
+    suspend fun generateDailyPlan(
+        dailyTargetCalories: Int?,
+        dailyMealCount: Int,
+        savedRecipesOnly: Boolean,
+        savedRecipes: List<com.matchpoint.myaidietapp.model.SavedRecipe>,
+        dietType: DietType,
+        inventorySummary: String?
+    ): DailyPlanResponse = withContext(Dispatchers.IO) {
+        val safeCount = dailyMealCount.coerceIn(1, 3)
+        val safeTarget = dailyTargetCalories
+            ?.coerceIn(800, 3000)
+            ?.takeIf { it > 0 }
+        val safeSaved = savedRecipes
+            .mapNotNull { r ->
+                val id = r.id.trim()
+                val title = r.title.trim()
+                if (id.isBlank() || title.isBlank()) return@mapNotNull null
+                SavedRecipeForPlan(
+                    id = id,
+                    title = title,
+                    text = r.text.takeIf { savedRecipesOnly } // only send text when needed
+                )
+            }
+            .take(12)
+
+        val response = service.checkIn(
+            CheckInRequest(
+                lastMeal = null,
+                hungerSummary = null,
+                weightTrend = null,
+                minutesSinceMeal = null,
+                mode = "daily_plan",
+                inventorySummary = inventorySummary,
+                dietType = dietType.name,
+                dailyTargetCalories = safeTarget,
+                dailyMealCount = safeCount,
+                dailySavedRecipesOnly = savedRecipesOnly,
+                savedRecipesForPlan = if (savedRecipesOnly) safeSaved else null,
+                clientLocalDate = localDayKey()
+            )
+        )
+        val raw = response.text.trim()
+        // If the Cloud Function isn't deployed with daily_plan support yet, it will fall back to normal chat
+        // and return plain text (not JSON). Moshi would throw a confusing "setLenient" error; make it explicit.
+        if (!raw.startsWith("{")) {
+            throw IllegalStateException("Daily plan backend returned non-JSON. Redeploy the Cloud Function. (got: ${raw.take(180)})")
+        }
+        dailyPlanAdapter.fromJson(raw)
+            ?: throw IllegalStateException("Empty daily plan response")
     }
 }

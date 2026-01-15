@@ -110,6 +110,14 @@ function computeLocalMinutes({ clientLocalMinutes, timezoneOffsetMinutes }) {
   return now.getHours() * 60 + now.getMinutes();
 }
 
+function computeLocalDayKey({ clientLocalDate }) {
+  // Prefer client-provided local date (YYYY-MM-DD) so "daily" resets at the user's local midnight.
+  const s = String(clientLocalDate || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // Fallback: UTC day key (legacy behavior).
+  return new Date().toISOString().slice(0, 10);
+}
+
 function minutesUntilWindowStart(nowMin, startMin) {
   const day = 24 * 60;
   const diff = (startMin - nowMin + day) % day;
@@ -152,6 +160,7 @@ functions.http('checkin', async (req, res) => {
       eatingWindowStartMinutes,
       eatingWindowEndMinutes,
       clientLocalMinutes,
+      clientLocalDate,
       timezoneOffsetMinutes,
 
       // Meal logging
@@ -299,7 +308,7 @@ functions.http('checkin', async (req, res) => {
     function dailyChatLimitForTier(t) {
       if (t === 'PRO') return 150;
       if (t === 'REGULAR') return 50;
-      return 5; // FREE
+      return 10; // FREE
     }
 
     // Separate budget for "expensive" analysis calls (vision + food analysis).
@@ -316,7 +325,7 @@ functions.http('checkin', async (req, res) => {
 
     async function tryConsumeAnalysisQuota(cost) {
       const now = new Date();
-      const dayKey = now.toISOString().slice(0, 10); // YYYY-MM-DD (UTC) for MVP
+      const dayKey = computeLocalDayKey({ clientLocalDate });
       const limit = dailyAnalysisLimitForTier(tier);
       const usageRef = db.collection('users').doc(uid).collection('meta').doc('usageDaily').collection('days').doc(dayKey);
 
@@ -354,12 +363,12 @@ functions.http('checkin', async (req, res) => {
     // Count only "chat submissions" (not food photo analysis):
     // - freeform chat
     // - generate meal
-    const countableModes = new Set(['FREEFORM', 'GENERATE_MEAL']);
+    // - daily plan
+    const countableModes = new Set(['FREEFORM', 'GENERATE_MEAL', 'DAILY_PLAN']);
     const modeKey = String(mode || 'freeform').toUpperCase();
 
     if (countableModes.has(modeKey)) {
-      const now = new Date();
-      const dayKey = now.toISOString().slice(0, 10); // YYYY-MM-DD (UTC). OK for MVP; later use client local date if needed.
+      const dayKey = computeLocalDayKey({ clientLocalDate });
       const limit = dailyChatLimitForTier(tier);
       const usageRef = db.collection('users').doc(uid).collection('meta').doc('usageDaily').collection('days').doc(dayKey);
 
@@ -694,6 +703,126 @@ No extra keys. No markdown. No text outside JSON.
         }
       }
 
+      return res.json({ text: JSON.stringify(parsed) });
+    }
+
+    // ---------- 1d) DAILY PLAN MODE (strict JSON) ----------
+    if (String(mode || '').toLowerCase() === 'daily_plan') {
+      const localMinutes = computeLocalMinutes({ clientLocalMinutes, timezoneOffsetMinutes });
+      const targetCalories = asNullableInt(req.body?.dailyTargetCalories);
+      const mealCountRaw = asNullableInt(req.body?.dailyMealCount);
+      const mealCount = clampInt(mealCountRaw ?? 3, 1, 3);
+      const savedOnly = !!req.body?.dailySavedRecipesOnly;
+      // Compute eating window bounds locally (can't reference variables declared later in the file).
+      const ws = Number.isFinite(Number(eatingWindowStartMinutes)) ? Math.round(Number(eatingWindowStartMinutes)) : null;
+      const we = Number.isFinite(Number(eatingWindowEndMinutes)) ? Math.round(Number(eatingWindowEndMinutes)) : null;
+
+      // Saved recipes: accept a small list of {id,title,text} (text optional).
+      const savedRecipesRaw = Array.isArray(req.body?.savedRecipesForPlan) ? req.body.savedRecipesForPlan : [];
+      const savedRecipes = savedRecipesRaw
+        .map((r) => ({
+          id: String(r?.id || '').trim(),
+          title: String(r?.title || '').trim(),
+          text: truncateText(String(r?.text || ''), 3500)
+        }))
+        .filter((r) => r.id && r.title)
+        .slice(0, 12);
+
+      const safeTarget = (targetCalories && targetCalories > 0) ? targetCalories : null;
+
+      const instructions = `
+You are a diet assistant inside a diet-management app.
+
+Goal: Create a simple DAILY MEAL PLAN for today using ${mealCount} meal(s).
+Daily calorie target: ${safeTarget ?? "unspecified"} (if unspecified, pick a reasonable default based on context and keep it moderate).
+
+Diet type: ${dietType || "unknown"}.
+User local minutes now: ${localMinutes}.
+Fasting preset: ${fastingPreset || "NONE"}.
+Eating window minutes: ${ws ?? "none"}-${we ?? "none"}.
+
+User’s known foods/inventory summary:
+${safeInventorySummary || "unknown"}
+
+Saved recipes only: ${savedOnly}.
+
+Rules:
+- Output STRICT JSON only. No markdown, no extra text.
+- Return calories as integers (estimatedCalories).
+- If dailyTargetCalories is provided: aim to be close (within about ±10% is fine). Do not obsess over exactness.
+- If saved recipes only is true: choose from the provided saved recipes. Do NOT invent new recipes.
+- If saved recipes only is false: you MAY generate new recipes.
+- Each meal should include a full cookable recipe text in the app’s format:
+  Title: ...
+  Why it fits: ...
+  Ingredients (from my list):
+  - ...
+  Steps:
+  1) ...
+  Cook time: ...
+  Temp: ...
+  Notes / swaps (only using my list): ...
+
+Return JSON object with EXACT shape:
+{
+  "dailyTargetCalories": number|null,
+  "totalEstimatedCalories": number,
+  "meals": [
+    {
+      "id": string,
+      "title": string,
+      "estimatedCalories": number,
+      "recipeText": string,
+      "sourceRecipeId": string|null
+    }
+  ]
+}
+      `.trim();
+
+      const savedBlock = savedOnly
+        ? `\nSaved recipes (choose from these IDs):\n${savedRecipes.map(r => `- ${r.id}: ${r.title}`).join('\n') || '(none)'}\n`
+        : '';
+      const savedTextsBlock = savedOnly
+        ? `\nSaved recipe texts (may help you estimate calories):\n${savedRecipes.map(r => `\n---\nID: ${r.id}\nTitle: ${r.title}\nText:\n${r.text || ''}`).join('\n')}\n`
+        : '';
+
+      const prompt = [
+        instructions,
+        savedBlock,
+        savedTextsBlock
+      ].join('\n');
+
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: pickModel({ isVision: false }),
+          messages: [
+            { role: 'system', content: 'You are a precise assistant. Always respond with strict JSON when asked.' },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.5
+        })
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text();
+        console.error('OpenAI daily_plan error', resp.status, text);
+        return res.status(502).json({ text: 'Service unavailable.' });
+      }
+
+      const data = await resp.json();
+      const contentText = data.choices?.[0]?.message?.content?.trim() || '';
+      let parsed;
+      try {
+        parsed = extractJsonObject(contentText);
+      } catch (e) {
+        console.error('Failed to parse daily_plan JSON', e, contentText);
+        return res.status(502).json({ text: 'Invalid JSON from model' });
+      }
       return res.json({ text: JSON.stringify(parsed) });
     }
 
@@ -1221,6 +1350,7 @@ Notes / swaps (only using my list): <short>
 
     // ---------- 2) CHAT / COACH MODES ----------
     const localMinutes = computeLocalMinutes({ clientLocalMinutes, timezoneOffsetMinutes });
+    const dayKey = computeLocalDayKey({ clientLocalDate });
     const windowStart = Number.isFinite(Number(eatingWindowStartMinutes)) ? Math.round(Number(eatingWindowStartMinutes)) : null;
     const windowEnd = Number.isFinite(Number(eatingWindowEndMinutes)) ? Math.round(Number(eatingWindowEndMinutes)) : null;
     const hasWindow = windowStart != null && windowEnd != null;
@@ -1229,12 +1359,33 @@ Notes / swaps (only using my list): <short>
       : (localMinutes >= windowStart || localMinutes < windowEnd)) : true;
     const minsToOpen = hasWindow && !insideWindow ? minutesUntilWindowStart(localMinutes, windowStart) : 0;
 
+    // Calorie tracking (stored per local dayKey by the client after parsing <APP_ACTION>).
+    let caloriesTodayTotal = 0;
+    let caloriesTodayEntryCount = 0;
+    try {
+      const calDoc = await db
+        .collection('users')
+        .doc(uid)
+        .collection('calories')
+        .doc(dayKey)
+        .get();
+      if (calDoc.exists) {
+        const d = calDoc.data() || {};
+        caloriesTodayTotal = Number.isFinite(Number(d.totalCalories)) ? Math.round(Number(d.totalCalories)) : 0;
+        caloriesTodayEntryCount = Number.isFinite(Number(d.entryCount)) ? Math.round(Number(d.entryCount)) : 0;
+      }
+    } catch (e) {
+      console.warn('caloriesToday read failed', e?.message || e);
+    }
+
     const contextLines = [
       "You are a short, casual, varied diet assistant inside a diet-management app.",
       `Diet type: ${dietType || "unknown"}.`,
       `Fasting preset: ${fastingPreset || "NONE"}.`,
       `Eating window minutes: ${hasWindow ? `${windowStart}-${windowEnd}` : "none"}.`,
       `User local minutes now: ${localMinutes}.`,
+      `Local dayKey: ${dayKey}.`,
+      `Calories logged today so far: ${caloriesTodayTotal} (entries: ${caloriesTodayEntryCount}).`,
       `Inside eating window: ${insideWindow}.`,
       `Minutes until window opens: ${hasWindow ? minsToOpen : "n/a"}.`,
       `Last meal (legacy): ${lastMeal || "unknown"}.`,
@@ -1251,12 +1402,19 @@ You are a helpful, conversational assistant inside a diet-management app.
 
 Core scope:
 - Help the user manage their Foods list, get quick food opinions, and chat about diet/fasting/menus.
-- The app does NOT do calorie counting or track what the user already ate today.
+- The app CAN estimate and track daily calories when the user tells you what they ate.
 - Eating window is informational: explain it; don’t command.
 
 Conversation:
 - If the message isn’t about food/diet/this app, just answer normally (don’t force diet talk).
 - Keep continuity; interpret “it/that/this” as the most recent food/topic unless unclear.
+
+Daily calories:
+- If the user is telling you what they ate/drank today, estimate calories and update their daily total.
+- Use "Calories logged today so far" from context when answering "How many calories so far today?".
+- When (and only when) the user is logging what they ate, end your message with EXACTLY:
+  <APP_ACTION>{"type":"LOG_CALORIES","entries":[{"label":"2 eggs and toast","calories":380}]}</APP_ACTION>
+- Return calories as integers; be reasonable and conservative with estimates. If unsure, say it’s an estimate.
 
 Recipes:
 - If the user asks for a recipe/meal to cook, output it in this exact structure so it can be saved:

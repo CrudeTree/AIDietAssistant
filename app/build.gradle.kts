@@ -33,8 +33,8 @@ android {
         applicationId = "com.myaidiet.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 26
-        versionName = "1.0.6"
+        versionCode = 35
+        versionName = "1.0.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -97,6 +97,7 @@ dependencies {
     // Firebase (Firestore + Analytics + Messaging via BoM)
     implementation(platform("com.google.firebase:firebase-bom:33.2.0"))
     implementation("com.google.firebase:firebase-firestore-ktx")
+    implementation("com.google.firebase:firebase-analytics-ktx")
     implementation("com.google.firebase:firebase-messaging-ktx")
     implementation("com.google.firebase:firebase-storage-ktx")
     implementation("com.google.firebase:firebase-auth-ktx")
@@ -119,8 +120,16 @@ dependencies {
     // Image loading for local photo previews in Compose (FoodPhotoCaptureScreen)
     implementation("io.coil-kt:coil-compose:2.7.0")
 
+    // In-app updates (shows "Update available" inside the app; only works for Play-installed builds)
+    implementation("com.google.android.play:app-update-ktx:2.1.0")
+
     // RevenueCat (subscriptions + receipt validation + restores)
     implementation("com.revenuecat.purchases:purchases:9.1.0")
+
+    // Google Play Billing Library (Play policy requires v7.0.0+).
+    // RevenueCat depends on Billing transitively; we pin the version to ensure compliance.
+    implementation("com.android.billingclient:billing:7.1.1")
+    implementation("com.android.billingclient:billing-ktx:7.1.1")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
@@ -129,4 +138,14 @@ dependencies {
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
+}
+
+// Ensure transitive dependencies cannot pull an older Billing Library (Play policy requires v7+).
+configurations.configureEach {
+    resolutionStrategy {
+        force(
+            "com.android.billingclient:billing:7.1.1",
+            "com.android.billingclient:billing-ktx:7.1.1"
+        )
+    }
 }

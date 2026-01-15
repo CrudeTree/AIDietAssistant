@@ -58,6 +58,15 @@ service cloud.firestore {
       match /recipes/{recipeId} {
         allow read, write: if isOwner(userId);
       }
+
+      // Daily calorie tracking (user-owned).
+      // Stored by local day key (YYYY-MM-DD) and reset naturally by day.
+      match /calories/{docId} {
+        allow read, write: if isOwner(userId);
+        match /{subpath=**} {
+          allow read, write: if isOwner(userId);
+        }
+      }
     }
 
     // Shared food catalog cache used by Cloud Functions.

@@ -15,7 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -58,8 +58,10 @@ fun SettingsScreen(
     isProcessing: Boolean,
     errorText: String?,
     onBack: () -> Unit,
+    onGoHome: () -> Unit,
     onToggleShowFoodIcons: (Boolean) -> Unit,
     onToggleShowWallpaperFoodIcons: (Boolean) -> Unit,
+    onToggleShowVineOverlay: (Boolean) -> Unit,
     onSetFontSizeSp: (Float) -> Unit,
     onUpdateWeightUnit: (WeightUnit) -> Unit,
     onUpdateWeightGoal: (Double?) -> Unit,
@@ -70,6 +72,7 @@ fun SettingsScreen(
     wallpaperSeed: Int
 ) {
     val ctx = LocalContext.current
+    val tutorialManager = remember(ctx) { HomeTutorialManager(ctx.applicationContext) }
     val tomatoId = remember {
         // User asked for "tomatoe" preview; your actual drawable is ic_food_tomato.webp.
         // We'll try a few common variants.
@@ -172,7 +175,7 @@ fun SettingsScreen(
                     onClick = onBack,
                     modifier = Modifier.align(Alignment.CenterStart)
                 ) {
-                    Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back")
+                    Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                 }
                 Image(
                     painter = painterResource(id = com.matchpoint.myaidietapp.R.drawable.settings),
@@ -238,6 +241,21 @@ fun SettingsScreen(
                     enabled = !isProcessing
                 )
             }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "Show vine over chat", style = MaterialTheme.typography.bodyMedium)
+                Switch(
+                    checked = profile.showVineOverlay,
+                    onCheckedChange = { onToggleShowVineOverlay(it) },
+                    enabled = !isProcessing
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
 
             // --- Font size slider with live preview ---
             Text(

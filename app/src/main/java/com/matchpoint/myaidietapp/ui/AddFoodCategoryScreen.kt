@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -75,49 +74,34 @@ fun AddFoodCategoryScreen(
 
             // Match the Profile button look/feel: image buttons with alpha-hit testing.
             BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                val gap = 10.dp
-                val cellW = (maxWidth - gap) / 2
-                val listH = 63.dp
+                val fullW = maxWidth
+                val listH = 68.dp
 
                 Column(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(gap),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            AlphaHitImageButton(
-                                resId = R.drawable.btn_meals,
-                                size = DpSize(width = cellW, height = listH),
-                                contentDescription = "Meals",
-                                enabled = enabled,
-                                onClick = onPickMeals
-                            )
-                        }
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            AlphaHitImageButton(
-                                resId = R.drawable.btn_snacks,
-                                size = DpSize(width = cellW, height = listH),
-                                contentDescription = "Snacks",
-                                enabled = enabled,
-                                onClick = onPickSnacks
-                            )
-                        }
-                    }
-
-                    // Second row: Ingredients centered (same width as a cell)
-                    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        AlphaHitImageButton(
-                            resId = R.drawable.btn_ingredients,
-                            size = DpSize(width = cellW, height = listH),
-                            contentDescription = "Ingredients",
-                            enabled = enabled,
-                            onClick = onPickIngredients
-                        )
-                    }
+                    AlphaHitImageButton(
+                        resId = R.drawable.btn_ingredients,
+                        size = DpSize(width = fullW, height = listH),
+                        contentDescription = "Ingredients",
+                        enabled = enabled,
+                        onClick = onPickIngredients
+                    )
+                    AlphaHitImageButton(
+                        resId = R.drawable.btn_snacks,
+                        size = DpSize(width = fullW, height = listH),
+                        contentDescription = "Snacks",
+                        enabled = enabled,
+                        onClick = onPickSnacks
+                    )
+                    AlphaHitImageButton(
+                        resId = R.drawable.btn_meals,
+                        size = DpSize(width = fullW, height = listH),
+                        contentDescription = "Meals",
+                        enabled = enabled,
+                        onClick = onPickMeals
+                    )
                 }
             }
         }

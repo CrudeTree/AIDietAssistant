@@ -44,7 +44,10 @@ data class UiState(
     val error: String? = null,
     val isProcessing: Boolean = false,
     val pendingGrocery: PendingGrocery? = null,
-    val planGateNotice: String? = null
+    val planGateNotice: String? = null,
+    val dailyPlanMeals: List<DailyPlanUiMeal> = emptyList(),
+    val dailyPlanTotalCount: Int = 0,
+    val dailyPlanDayId: String? = null
 )
 
 // (Old upgrade modal removed in favor of a full "Choose a plan" screen.)
@@ -53,6 +56,14 @@ data class PendingGrocery(
     val id: String,
     val aiMessage: String,
     val item: FoodItem
+)
+
+data class DailyPlanUiMeal(
+    val id: String,
+    val title: String,
+    val estimatedCalories: Int,
+    val recipeText: String,
+    val sourceRecipeId: String? = null
 )
 
 private fun FoodItem.effectiveCategories(): Set<String> {
@@ -79,6 +90,15 @@ private fun HttpException.safeErrorBodySnippet(maxChars: Int = 220): String? {
 private fun describeProxyHttpError(e: HttpException): String {
     val body = e.safeErrorBodySnippet()
     return if (body.isNullOrBlank()) "proxy HTTP ${e.code()}" else "proxy HTTP ${e.code()} $body"
+}
+
+private fun buildDailyLimitGateNotice(e: HttpException): String {
+    val detail = e.safeErrorBodySnippet(420)
+    return if (!detail.isNullOrBlank()) {
+        "Daily Limit Reached.\n\n$detail"
+    } else {
+        "Daily Limit Reached."
+    }
 }
 
 class HomeViewModel(
@@ -123,6 +143,7 @@ class HomeViewModel(
     private val scheduleRepo by lazy { ScheduledMealsRepository(db, userId) }
     private val messagesRepo by lazy { MessagesRepository(db, userId) }
     private val recipesRepo by lazy { RecipesRepository(db, userId) }
+    private val calorieRepo by lazy { com.matchpoint.myaidietapp.data.CalorieRepository(db, userId) }
     private val storageRepo by lazy { StorageRepository() }
     private val proxyRepo by lazy { OpenAiProxyRepository() }
     private val authRepo by lazy { AuthRepository() }
@@ -135,15 +156,18 @@ class HomeViewModel(
 
     private suspend fun bootstrap() {
         try {
-            val profile = userRepo.getUserProfile()
-            if (profile == null) {
-                _uiState.value = UiState(
-                    isLoading = false,
-                    profile = null,
-                    todaySchedule = null,
-                    messages = emptyList()
+            // If the user doc doesn't exist yet (new account), auto-create defaults.
+            // We intentionally do NOT require name/weight/goal/diet/fasting setup.
+            val profile = userRepo.getUserProfile() ?: run {
+                val created = UserProfile(
+                    dietType = DietType.NO_DIET,
+                    showVineOverlay = false,
+                    fastingPreset = FastingPreset.NONE,
+                    eatingWindowStartMinutes = null,
+                    eatingWindowEndMinutes = null
                 )
-                return
+                userRepo.saveUserProfile(created)
+                created
             }
 
             val todayDate = LocalDate.now(zoneId)
@@ -280,6 +304,13 @@ class HomeViewModel(
 
     fun clearPlanGateNotice() {
         _uiState.value = _uiState.value.copy(planGateNotice = null)
+    }
+
+    private fun gateIfDailyLimit(e: Throwable): Boolean {
+        val he = e as? HttpException ?: return false
+        if (he.code() != 429) return false
+        _uiState.value = _uiState.value.copy(planGateNotice = buildDailyLimitGateNotice(he))
+        return true
     }
 
     fun signOut() {
@@ -544,6 +575,7 @@ class HomeViewModel(
                 }
             }.onFailure { e ->
                 Log.e("DigitalStomach", "analyzeFood failed", e)
+                if (gateIfDailyLimit(e)) return
             }
 
             val analysis = analysisAttempt.getOrNull()
@@ -853,6 +885,78 @@ class HomeViewModel(
         }
     }
 
+    fun generateDailyPlan(
+        dailyTargetCalories: Int?,
+        mealCount: Int,
+        savedRecipesOnly: Boolean
+    ) {
+        viewModelScope.launch {
+            try {
+                _uiState.value = _uiState.value.copy(isProcessing = true, error = null)
+                val profile = userRepo.getUserProfile() ?: return@launch
+                val inventorySummary = buildInventorySummary(profile)
+                val saved = _uiState.value.savedRecipes
+
+                val plan = proxyRepo.generateDailyPlan(
+                    dailyTargetCalories = dailyTargetCalories,
+                    dailyMealCount = mealCount,
+                    savedRecipesOnly = savedRecipesOnly,
+                    savedRecipes = saved,
+                    dietType = profile.dietType,
+                    inventorySummary = inventorySummary
+                )
+
+                val meals = plan.meals
+                    .map { m ->
+                        DailyPlanUiMeal(
+                            id = m.id.ifBlank { UUID.randomUUID().toString() },
+                            title = m.title.ifBlank { "Meal" },
+                            estimatedCalories = (m.estimatedCalories).coerceAtLeast(0),
+                            recipeText = m.recipeText.orEmpty(),
+                            sourceRecipeId = m.sourceRecipeId
+                        )
+                    }
+                    .take(3)
+
+                val dayId = LocalDate.now(zoneId).toString()
+                _uiState.value = _uiState.value.copy(
+                    dailyPlanMeals = meals,
+                    dailyPlanTotalCount = meals.size,
+                    dailyPlanDayId = dayId
+                )
+            } catch (e: Exception) {
+                if (gateIfDailyLimit(e)) return@launch
+                val msg = when (e) {
+                    is HttpException -> {
+                        if (e.code() == 429) "Daily limit reached. Upgrade your plan to keep chatting."
+                        else "No service: ${describeProxyHttpError(e)}"
+                    }
+                    is IllegalStateException -> {
+                        // Make parsing/config errors user-friendly (e.g., daily_plan backend not deployed yet).
+                        e.message ?: "Daily plan unavailable."
+                    }
+                    else -> e.message ?: "Failed to generate daily plan."
+                }
+                _uiState.value = _uiState.value.copy(error = msg)
+            } finally {
+                _uiState.value = _uiState.value.copy(isProcessing = false)
+            }
+        }
+    }
+
+    fun completeDailyPlanMeal(mealId: String) {
+        val updated = _uiState.value.dailyPlanMeals.filterNot { it.id == mealId }
+        _uiState.value = _uiState.value.copy(dailyPlanMeals = updated)
+    }
+
+    fun clearDailyPlan() {
+        _uiState.value = _uiState.value.copy(
+            dailyPlanMeals = emptyList(),
+            dailyPlanTotalCount = 0,
+            dailyPlanDayId = null
+        )
+    }
+
     fun markIntroDone() {
         _uiState.value = _uiState.value.copy(introPending = false)
     }
@@ -937,6 +1041,30 @@ class HomeViewModel(
         viewModelScope.launch {
             try {
                 userRepo.updateShowWallpaperFoodIcons(show)
+                val updated = userRepo.getUserProfile()
+                _uiState.value = _uiState.value.copy(profile = updated)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message)
+            }
+        }
+    }
+
+    fun updateShowVineOverlay(show: Boolean) {
+        viewModelScope.launch {
+            try {
+                userRepo.updateShowVineOverlay(show)
+                val updated = userRepo.getUserProfile()
+                _uiState.value = _uiState.value.copy(profile = updated)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message)
+            }
+        }
+    }
+
+    fun markBeginnerIngredientsPickerSeen() {
+        viewModelScope.launch {
+            try {
+                userRepo.updateHasSeenBeginnerIngredientsPicker(true)
                 val updated = userRepo.getUserProfile()
                 _uiState.value = _uiState.value.copy(profile = updated)
             } catch (e: Exception) {
@@ -1189,12 +1317,8 @@ class HomeViewModel(
                 }.onFailure { e ->
                     Log.e("DigitalStomach", "Freeform proxy failed", e)
                     if (e is HttpException && e.code() == 429) {
-                        val detail = e.safeErrorBodySnippet(420)
                         _uiState.value = _uiState.value.copy(
-                            planGateNotice = if (!detail.isNullOrBlank())
-                                "You have reached your daily limit.\n\n$detail"
-                            else
-                                "You have reached your daily limit."
+                            planGateNotice = buildDailyLimitGateNotice(e)
                         )
                     }
                 }
@@ -1234,6 +1358,7 @@ class HomeViewModel(
                     // Safety: only execute list-mutation actions if the USER explicitly asked to add.
                     val shouldExecute = when (appAction.type) {
                         "ADD_FOODS" -> userAskedToAddFoods(message)
+                        "LOG_CALORIES" -> userLikelyLoggingCalories(message)
                         else -> true
                     }
                     if (!shouldExecute) {
@@ -1319,15 +1444,32 @@ class HomeViewModel(
         return hasAddVerb && hasListTarget
     }
 
+    private fun userLikelyLoggingCalories(userMessage: String): Boolean {
+        val t = userMessage.trim().lowercase()
+        if (t.isBlank()) return false
+        // Avoid accidental logs when the user is asking for totals/info.
+        if (Regex("\\bhow\\s+many\\s+calories\\b").containsMatchIn(t)) return false
+        if (Regex("\\b(total|so\\s+far|today)\\b.*\\bcalories\\b").containsMatchIn(t) && t.contains("?")) return false
+        // Require an "intake" verb/phrase.
+        val intakeCue = Regex("\\b(i\\s+(ate|had|drank)|for\\s+(breakfast|lunch|dinner)|my\\s+(breakfast|lunch|dinner)|snack(ed)?\\s+on)\\b")
+        return intakeCue.containsMatchIn(t)
+    }
+
     private data class AppActionFood(
         val name: String,
         val category: String?,
         val qualifier: String?
     )
 
+    private data class AppActionCalorieEntry(
+        val label: String,
+        val calories: Int
+    )
+
     private data class AppAction(
         val type: String,
-        val items: List<AppActionFood>
+        val items: List<AppActionFood> = emptyList(),
+        val entries: List<AppActionCalorieEntry> = emptyList()
     )
 
     private fun extractAppActionFromAiText(text: String): Pair<String, AppAction?> {
@@ -1387,7 +1529,20 @@ class HomeViewModel(
                 )
             }
         }
-        return AppAction(type = type, items = items)
+
+        val entriesArr = obj.optJSONArray("entries") ?: JSONArray()
+        val entries = buildList {
+            for (i in 0 until entriesArr.length()) {
+                val it = entriesArr.optJSONObject(i) ?: continue
+                val label = it.optString("label").trim()
+                if (label.isBlank()) continue
+                val calories = it.optInt("calories", -1)
+                if (calories < 0) continue
+                add(AppActionCalorieEntry(label = label, calories = calories))
+            }
+        }
+
+        return AppAction(type = type, items = items, entries = entries)
     }
 
     private fun normalizeActionCategory(raw: String?): String {
@@ -1409,10 +1564,32 @@ class HomeViewModel(
     private suspend fun applyAppAction(action: AppAction) {
         when (action.type) {
             "ADD_FOODS" -> applyAddFoodsAction(action.items)
+            "LOG_CALORIES" -> applyLogCaloriesAction(action.entries)
             else -> Unit
         }
     }
 
+    private suspend fun applyLogCaloriesAction(entries: List<AppActionCalorieEntry>) {
+        if (entries.isEmpty()) return
+        // Only log calories on explicit "I ate/had..." style messages to avoid accidental writes.
+        // (We still let the AI *talk* about calories freely.)
+        val lastUserMessage = _uiState.value.messages.lastOrNull { it.sender == MessageSender.USER }?.text
+        if (lastUserMessage != null && !userLikelyLoggingCalories(lastUserMessage)) return
+
+        val dayKey = java.time.LocalDate.now(zoneId).toString()
+        val toStore = entries.map { e ->
+            com.matchpoint.myaidietapp.data.CalorieEntry(
+                label = e.label,
+                calories = e.calories,
+                createdAt = com.google.firebase.Timestamp.now(),
+                source = "chat"
+            )
+        }
+        calorieRepo.appendEntries(dayKey, toStore)
+
+        // Optional: keep it quiet (no extra spam). The AI's visible reply should already mention the estimate.
+        // If we want a debug confirmation later, we can add a small toast/message.
+    }
     private suspend fun applyAddFoodsAction(items: List<AppActionFood>) {
         if (items.isEmpty()) return
 
@@ -1548,7 +1725,11 @@ class HomeViewModel(
         return joined.ifBlank { null }
     }
 
-    fun generateMeal(requiredIngredients: List<String> = emptyList()) {
+    fun generateMeal(
+        requiredIngredients: List<String> = emptyList(),
+        targetCalories: Int? = null,
+        strictOnly: Boolean = false
+    ) {
         viewModelScope.launch {
             try {
                 _uiState.value = _uiState.value.copy(isProcessing = true)
@@ -1563,6 +1744,7 @@ class HomeViewModel(
                     .filter { it.isNotBlank() }
                     .distinctBy { it.lowercase() }
                     .take(6)
+                val target = targetCalories?.coerceIn(100, 1000)
 
                 val replyResult = runCatching {
                     val now = java.time.LocalTime.now(zoneId)
@@ -1579,10 +1761,23 @@ class HomeViewModel(
                                 append("Generate a dinner recipe I can cook now. ")
                                 append("Use my INGREDIENTS list (and SNACKS if useful). ")
                                 append("Do not use emojis. ")
+                                if (target != null) {
+                                    append("Target about ")
+                                    append(target)
+                                    append(" calories total for the meal. ")
+                                }
                                 if (required.isNotEmpty()) {
                                     append("MUST include these ingredients: ")
                                     append(required.joinToString(", "))
                                     append(". ")
+                                    append("If you cannot include any required ingredient, explicitly state which one(s) you could not include and why. ")
+                                    if (strictOnly) {
+                                        append("STRICT MODE: Use ONLY the ingredients listed above. ")
+                                        append("You MAY use *only* these minimal pantry staples if needed: salt, black pepper, water, cooking oil, butter. ")
+                                        append("Do NOT add any other ingredients (for example: eggs, milk, cheese, flour, rice, pasta, bread, sauces, spices, herbs, garlic, onion, sugar, etc.). ")
+                                        append("If you cannot make a complete recipe using only the selected ingredients + the allowed pantry staples, say so clearly and ask me which ONE extra ingredient I can allow. ")
+                                        append("Also include an 'Ingredients used:' list and ensure it contains ONLY the selected ingredients plus any allowed pantry staples you used. ")
+                                    }
                                 }
                                 append("Give step-by-step instructions with times/temps. ")
                                 append("If I don't have enough ingredients, say what I'm missing and suggest a short shopping list.")
@@ -1601,12 +1796,8 @@ class HomeViewModel(
                     )
                 }.onFailure { e ->
                     if (e is HttpException && e.code() == 429) {
-                        val detail = e.safeErrorBodySnippet(420)
                         _uiState.value = _uiState.value.copy(
-                            planGateNotice = if (!detail.isNullOrBlank())
-                                "You have reached your daily limit.\n\n$detail"
-                            else
-                                "You have reached your daily limit."
+                            planGateNotice = buildDailyLimitGateNotice(e)
                         )
                     }
                 }
@@ -1694,6 +1885,57 @@ class HomeViewModel(
         }
     }
 
+    fun saveDailyPlanMeal(mealId: String) {
+        viewModelScope.launch {
+            try {
+                val meal = _uiState.value.dailyPlanMeals.firstOrNull { it.id == mealId }
+                    ?: run { _uiState.value = _uiState.value.copy(error = "Meal not found."); return@launch }
+
+                val parsed = RecipeParser.parse(meal.recipeText)
+                val title = meal.title.ifBlank { parsed.title.ifBlank { "Meal" } }
+
+                // Avoid duplicates: if a recipe with same title and body already exists, do nothing.
+                if (_uiState.value.savedRecipes.any { r ->
+                        r.title.trim().equals(title.trim(), ignoreCase = true) &&
+                            r.text.trim().equals(meal.recipeText.trim(), ignoreCase = false)
+                    }
+                ) {
+                    messagesRepo.appendMessage(
+                        MessageEntry(
+                            id = UUID.randomUUID().toString(),
+                            sender = MessageSender.AI,
+                            text = "Already saved in Profile → Recipes."
+                        )
+                    )
+                    _uiState.value = _uiState.value.copy(messages = messagesRepo.getMessageLog().log)
+                    return@launch
+                }
+
+                val recipe = SavedRecipe(
+                    id = UUID.randomUUID().toString(),
+                    sourceMessageId = null,
+                    title = title,
+                    text = meal.recipeText,
+                    ingredients = parsed.ingredients
+                )
+                recipesRepo.saveRecipe(recipe)
+                val updated = recipesRepo.listRecipesNewestFirst()
+                _uiState.value = _uiState.value.copy(savedRecipes = updated)
+
+                messagesRepo.appendMessage(
+                    MessageEntry(
+                        id = UUID.randomUUID().toString(),
+                        sender = MessageSender.AI,
+                        text = "Saved to Profile → Recipes."
+                    )
+                )
+                _uiState.value = _uiState.value.copy(messages = messagesRepo.getMessageLog().log)
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(error = e.message ?: "Failed to save recipe.")
+            }
+        }
+    }
+
     fun deleteSavedRecipe(recipeId: String) {
         viewModelScope.launch {
             try {
@@ -1748,6 +1990,8 @@ class HomeViewModel(
                         nutritionFactsUrl = nutritionFactsUrl,
                         dietType = diet
                     )
+                }.onFailure { e ->
+                    if (gateIfDailyLimit(e)) return@launch
                 }.getOrNull()
 
                 if (analysis == null) {
@@ -1838,13 +2082,18 @@ class HomeViewModel(
                 val profile = userRepo.getUserProfile() ?: return@launch
                 val inventorySummary = buildInventorySummary(profile)
 
-                val text = runCatching {
+                val textResult = runCatching {
                     proxyRepo.analyzeMenu(
                         menuPhotoUrl = menuPhotoUrl,
                         dietType = profile.dietType,
                         inventorySummary = inventorySummary
                     )
-                }.getOrElse { e ->
+                }
+                textResult.exceptionOrNull()?.let { e ->
+                    if (gateIfDailyLimit(e)) return@launch
+                }
+
+                val text = textResult.getOrElse { e ->
                     when (e) {
                         is HttpException -> "No service: ${describeProxyHttpError(e)}"
                         else -> "No service. Check internet connectivity. (${e.javaClass.simpleName})"

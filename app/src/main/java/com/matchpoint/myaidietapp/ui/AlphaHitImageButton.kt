@@ -16,6 +16,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -39,6 +40,9 @@ fun AlphaHitImageButton(
     size: DpSize,
     contentDescription: String?,
     enabled: Boolean = true,
+    // Visually "zoom" inside the button to compensate for transparent padding in the asset.
+    // 1f = normal. >1f will crop slightly (clipped to bounds).
+    visualScale: Float = 1f,
     // Lower threshold = easier to tap (counts anti-aliased edges).
     alphaThreshold: Float = 0.02f,
     onClick: () -> Unit
@@ -65,6 +69,7 @@ fun AlphaHitImageButton(
                         boxSize = boxSize,
                         bitmapW = bitmap.width,
                         bitmapH = bitmap.height,
+                        visualScale = visualScale,
                         threshold = alphaThreshold,
                         pixelMap = pixelMap
                     )
@@ -85,7 +90,13 @@ fun AlphaHitImageButton(
         Image(
             bitmap = bitmap,
             contentDescription = contentDescription,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer(
+                    scaleX = visualScale,
+                    scaleY = visualScale,
+                    clip = true
+                ),
             contentScale = ContentScale.Fit
         )
     }
@@ -96,13 +107,14 @@ private fun hitTestAlpha(
     boxSize: IntSize,
     bitmapW: Int,
     bitmapH: Int,
+    visualScale: Float,
     threshold: Float,
     pixelMap: androidx.compose.ui.graphics.PixelMap
 ): Boolean {
     // ContentScale.Fit math: image is centered and scaled uniformly to fit inside box.
     val bw = boxSize.width.toFloat()
     val bh = boxSize.height.toFloat()
-    val scale = min(bw / bitmapW.toFloat(), bh / bitmapH.toFloat())
+    val scale = min(bw / bitmapW.toFloat(), bh / bitmapH.toFloat()) * visualScale
     val drawnW = bitmapW * scale
     val drawnH = bitmapH * scale
     val ox = (bw - drawnW) / 2f

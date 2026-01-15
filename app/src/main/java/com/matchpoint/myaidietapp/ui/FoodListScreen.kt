@@ -35,6 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -43,6 +44,7 @@ import com.matchpoint.myaidietapp.model.DietType
 import com.matchpoint.myaidietapp.model.FoodItem
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.draw.clipToBounds
 import com.matchpoint.myaidietapp.R
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.material.icons.Icons
@@ -150,12 +152,11 @@ fun FoodListScreen(
             Text(
                 text = run {
                     val used = items.size
-                    val remaining = (totalLimit - used).coerceAtLeast(0)
                     val dietLabel = if (dietType == DietType.NO_DIET) "No Diet" else dietType.name
                     if (filterCategory.isNullOrBlank()) {
                         "Items: $used / $totalLimit • Diet: $dietLabel"
                     } else {
-                        "$title • $remaining/$totalLimit available • Diet: $dietLabel"
+                        "$title • Items: $used / $totalLimit • Diet: $dietLabel"
                     }
                 },
                 style = MaterialTheme.typography.bodySmall,
@@ -230,7 +231,9 @@ fun FoodListScreen(
                     }
                     val fs = fontSizeSp.coerceIn(12f, 40f)
                     // Make list icons ~1.5x larger.
-                    val iconDp = (fs * 3.0f).coerceIn(24f, 96f).dp
+                    val iconDp = (fs * 4.5f).coerceIn(36f, 96f).dp
+                    // The Chicken asset has extra padding, so "zoom" it slightly within the same slot.
+                    val isChicken = item.name.trim().equals("Chicken", ignoreCase = true)
                     val healthRating = item.rating
                     val dietFitRating = item.dietRatings[dietType.name] ?: item.dietFitRating
 
@@ -278,6 +281,13 @@ fun FoodListScreen(
                                     modifier = Modifier
                                         .size(iconDp)
                                         .padding(end = 10.dp)
+                                        .then(
+                                            if (isChicken) {
+                                                Modifier
+                                                    .clipToBounds()
+                                                    .graphicsLayer(scaleX = 1.35f, scaleY = 1.35f)
+                                            } else Modifier
+                                        )
                                 )
                             }
                             Text(

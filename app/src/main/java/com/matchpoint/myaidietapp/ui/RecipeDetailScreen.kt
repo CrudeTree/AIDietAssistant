@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -45,7 +46,8 @@ import com.matchpoint.myaidietapp.model.UserProfile
 fun RecipeDetailScreen(
     recipe: SavedRecipe,
     profile: UserProfile,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onSave: (() -> Unit)? = null
 ) {
     val ctx = LocalContext.current
     // Temporary per-screen toggle. Defaults to Settings each time you open this screen.
@@ -72,84 +74,114 @@ fun RecipeDetailScreen(
     val missing = detected.filterNot { userHasIconIds.contains(it.resId) }
 
     Surface {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+        androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(20.dp)
+                    // Ensure the last lines of the recipe aren't hidden behind the system nav bar.
+                    .navigationBarsPadding(),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                IconButton(onClick = onBack) {
-                    Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back")
-                }
-                Spacer(modifier = Modifier.weight(1f))
-
-                // Temporary toggle: does not persist; resets to Settings after leaving this screen.
-                Switch(
-                    checked = showIcons,
-                    onCheckedChange = { showIcons = it }
-                )
-            }
-
-            Text(
-                text = recipe.title.ifBlank { "Recipe" },
-                style = MaterialTheme.typography.headlineSmall.copy(fontSize = (fontSp + 6f).coerceAtMost(46f).sp),
-                fontWeight = FontWeight.Bold
-            )
-
-            if (showIcons && have.isNotEmpty()) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.CheckCircle,
-                        contentDescription = "Available ingredients",
-                        tint = Color(0xFF2E7D32),
-                        modifier = Modifier.size(26.dp)
+                    IconButton(onClick = onBack) {
+                        Icon(imageVector = Icons.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
+
+                    // Temporary toggle: does not persist; resets to Settings after leaving this screen.
+                    Switch(
+                        checked = showIcons,
+                        onCheckedChange = { showIcons = it }
                     )
                 }
-                val base = (fontSp * 4.0f).coerceIn(48f, 144f)
-                IngredientIconFlow(items = have, iconSize = (base * 0.8f).dp)
-            }
 
-            if (showIcons && missing.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Close,
-                        contentDescription = "Missing ingredients",
-                        tint = Color(0xFFB00020),
-                        modifier = Modifier.size(26.dp)
-                    )
-                }
-                val base = (fontSp * 4.0f).coerceIn(48f, 144f)
-                IngredientIconFlow(items = missing, iconSize = (base * 0.8f).dp)
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-
-            if (showIcons) {
-                RecipeTextWithIngredientIcons(
-                    text = recipe.text,
-                    ingredients = recipe.ingredients,
-                    iconSize = (((fontSp + 4f) * 2f) * 0.8f).sp,
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = fontSp.sp, lineHeight = (fontSp * 1.35f).sp),
-                    includeAllIconMatchesInText = true
-                )
-            } else {
                 Text(
-                    text = recipe.text,
-                    style = MaterialTheme.typography.bodyLarge.copy(fontSize = fontSp.sp, lineHeight = (fontSp * 1.35f).sp)
+                    text = recipe.title.ifBlank { "Recipe" },
+                    style = MaterialTheme.typography.headlineSmall.copy(fontSize = (fontSp + 6f).coerceAtMost(46f).sp),
+                    fontWeight = FontWeight.Bold
                 )
+
+                if (showIcons && have.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.CheckCircle,
+                            contentDescription = "Available ingredients",
+                            tint = Color(0xFF2E7D32),
+                            modifier = Modifier.size(39.dp)
+                        )
+                    }
+                    val base = (fontSp * 4.0f).coerceIn(48f, 144f)
+                    IngredientIconFlow(items = have, iconSize = (base * 0.8f).dp)
+                }
+
+                if (showIcons && missing.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Missing ingredients",
+                            tint = Color(0xFFB00020),
+                            modifier = Modifier.size(39.dp)
+                        )
+                    }
+                    val base = (fontSp * 4.0f).coerceIn(48f, 144f)
+                    IngredientIconFlow(items = missing, iconSize = (base * 0.8f).dp)
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                if (showIcons) {
+                    RecipeTextWithIngredientIcons(
+                        text = recipe.text,
+                        ingredients = recipe.ingredients,
+                        iconSize = (((fontSp + 4f) * 2f) * 0.8f).sp,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = fontSp.sp, lineHeight = (fontSp * 1.35f).sp),
+                        includeAllIconMatchesInText = true
+                    )
+                } else {
+                    Text(
+                        text = recipe.text,
+                        style = MaterialTheme.typography.bodyLarge.copy(fontSize = fontSp.sp, lineHeight = (fontSp * 1.35f).sp)
+                    )
+                }
+
+                // Add some space so long recipes don't hide behind the save button.
+                if (onSave != null) {
+                    Spacer(modifier = Modifier.height(120.dp))
+                }
+
+                // Extra bottom slack for gesture/nav bar even when there's no Save button.
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            // Daily plan save button: bottom-left, 3x bigger, nav-bar safe.
+            if (onSave != null) {
+                IconButton(
+                    onClick = onSave,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .navigationBarsPadding()
+                        .padding(start = 10.dp, bottom = 10.dp)
+                        .size(192.dp)
+                ) {
+                    Image(
+                        painter = painterResource(id = com.matchpoint.myaidietapp.R.drawable.btn_save),
+                        contentDescription = "Save recipe",
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
         }
     }

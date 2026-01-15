@@ -151,9 +151,15 @@ data class UserProfile(
      */
     val weightUnit: WeightUnit = WeightUnit.LB,
     val weightGoal: Double? = null,
-    val dietType: DietType = DietType.CARNIVORE,
+    // Default to NO_DIET for lowest-friction onboarding.
+    val dietType: DietType = DietType.NO_DIET,
     // Pricing tier (local MVP; later should be driven by Play Billing + server checks)
     val subscriptionTier: SubscriptionTier = SubscriptionTier.FREE,
+    /**
+     * Server-side sync timestamp when subscriptionTier was last updated.
+     * Written by the Cloud Function; kept optional for backward compatibility.
+     */
+    val subscriptionTierUpdatedAt: Timestamp? = null,
     /**
      * UI preference: show cute food/ingredient icons (ic_food_*) in lists and recipes.
      */
@@ -163,9 +169,17 @@ data class UserProfile(
      */
     val showWallpaperFoodIcons: Boolean = true,
     /**
+     * UI preference: show the vine overlay above the chat box on Home.
+     */
+    val showVineOverlay: Boolean = false,
+    /**
      * One-time-only friendly intro. When true, we won't auto-insert the intro messages again.
      */
     val hasSeenWelcomeIntro: Boolean = false,
+    /**
+     * One-time beginner helper: show the popular-ingredients picker once.
+     */
+    val hasSeenBeginnerIngredientsPicker: Boolean = false,
     /**
      * UI preference: base font size (sp) for long-form content like recipes and chat.
      * Kept in a safe range in UI (e.g. 12..40) to avoid breaking layouts.

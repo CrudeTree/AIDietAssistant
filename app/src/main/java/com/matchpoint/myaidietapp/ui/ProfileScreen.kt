@@ -34,8 +34,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.TextButton
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -55,7 +53,6 @@ import androidx.compose.ui.res.painterResource
 import com.matchpoint.myaidietapp.model.SavedRecipe
 import com.matchpoint.myaidietapp.model.SubscriptionTier
 import com.matchpoint.myaidietapp.model.UserProfile
-import com.matchpoint.myaidietapp.model.WeightUnit
 import com.matchpoint.myaidietapp.R
 import android.content.Intent
 import android.net.Uri
@@ -68,8 +65,6 @@ fun ProfileScreen(
     onBack: () -> Unit,
     onRemoveFood: (String) -> Unit,
     onAutoPilotChange: (Boolean) -> Unit,
-    onUpdateWeightGoal: (Double?) -> Unit,
-    onLogWeight: (Double) -> Unit,
     onOpenFoodList: (String?) -> Unit,
     onOpenRecipeList: () -> Unit,
     onSignOut: () -> Unit,
@@ -80,16 +75,6 @@ fun ProfileScreen(
     onOpenSettings: () -> Unit,
     wallpaperSeed: Int
 ) {
-    val unit = profile.weightUnit
-    fun lbToKg(lb: Double): Double = lb / 2.2046226218
-    fun fromLb(lb: Double): Double = if (unit == WeightUnit.KG) lbToKg(lb) else lb
-    fun formatWeight(lb: Double): String {
-        val v = fromLb(lb)
-        val rounded = kotlin.math.round(v * 10.0) / 10.0
-        val suffix = if (unit == WeightUnit.KG) "kg" else "lb"
-        return "${rounded} $suffix"
-    }
-
     val tier = displayTier
     val context = LocalContext.current
 
@@ -108,7 +93,7 @@ fun ProfileScreen(
                     .imePadding()
                     .padding(24.dp)
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
                 horizontalAlignment = Alignment.Start
             ) {
             // Centered title image
@@ -158,39 +143,52 @@ fun ProfileScreen(
             BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 6.dp)
+                    .padding(vertical = 2.dp)
             ) {
                 val gap = 10.dp
                 val cellW = (maxWidth - gap) / 2
+                // Food list usage (tier-based caps)
+                val foodLimit = when (tier) {
+                    SubscriptionTier.FREE -> 20
+                    SubscriptionTier.REGULAR -> 100
+                    SubscriptionTier.PRO -> 500
+                }
                 // Left side: plan text + badge
-                Row(
+                Column(
                     modifier = Modifier.align(Alignment.CenterStart),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    Text(
-                        text = "Plan:",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    if (tier == SubscriptionTier.FREE) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "Free",
+                            text = "Plan:",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(start = 8.dp)
+                            fontWeight = FontWeight.SemiBold
                         )
-                    } else {
-                        val badge =
-                            if (tier == SubscriptionTier.REGULAR) R.drawable.ic_basic_badge else R.drawable.ic_premium_badge
-                        Image(
-                            painter = painterResource(badge),
-                            contentDescription = null,
-                            modifier = Modifier
-                                .padding(start = 8.dp)
-                                // ~30% larger than 68dp
-                                .size(88.dp)
-                        )
+                        if (tier == SubscriptionTier.FREE) {
+                            Text(
+                                text = "Free",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 8.dp)
+                            )
+                        } else {
+                            val badge =
+                                if (tier == SubscriptionTier.REGULAR) R.drawable.ic_basic_badge else R.drawable.ic_premium_badge
+                            Image(
+                                painter = painterResource(badge),
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .padding(start = 8.dp)
+                                    // ~30% larger than 68dp
+                                    .size(88.dp)
+                            )
+                        }
                     }
+                    Text(
+                        text = "Food items: ${profile.foodItems.size} / $foodLimit",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 // Right column: center inside the same "cell" width as Snacks.
                 Box(
@@ -201,9 +199,10 @@ fun ProfileScreen(
                 ) {
                     AlphaHitImageButton(
                         resId = R.drawable.upgrade,
-                        size = DpSize(width = 170.dp, height = 64.dp),
+                        size = DpSize(width = 383.dp, height = 144.dp),
                         contentDescription = "View / Upgrade",
                         enabled = !isProcessing,
+                        visualScale = 1.5f,
                         onClick = onOpenChoosePlan
                     )
                 }
@@ -234,26 +233,13 @@ fun ProfileScreen(
                 }
             }
 
-            // Food list usage (tier-based caps)
-            val foodLimit = when (tier) {
-                SubscriptionTier.FREE -> 20
-                SubscriptionTier.REGULAR -> 100
-                SubscriptionTier.PRO -> 500
-            }
-            Text(
-                text = "Food items: ${profile.foodItems.size} / $foodLimit",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
             // Feeding schedule control removed (for now).
-            Spacer(modifier = Modifier.height(8.dp))
 
             // Saved recipes: counter pinned left; button on the right-half (left edge aligned to screen center).
             BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
                 val gap = 10.dp
                 val cellW = (maxWidth - gap) / 2
-                val recipeBtnSize = DpSize(width = 182.dp, height = 78.dp) // ~35% smaller
+                val recipeBtnSize = DpSize(width = 473.dp, height = 198.dp)
 
                 Text(
                     text = "Recipes: ${savedRecipes.size}",
@@ -273,159 +259,51 @@ fun ProfileScreen(
                         size = recipeBtnSize,
                         contentDescription = "Recipes",
                         enabled = !isProcessing,
+                        visualScale = 1.5f,
                         onClick = { onOpenRecipeList() }
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "Weight",
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-
-            val latestWeight = profile.weightHistory.maxByOrNull { it.date }?.weight
-            Text(
-                text = "Latest weight: ${latestWeight?.let { formatWeight(it) } ?: "not logged"}",
-                style = MaterialTheme.typography.bodyMedium
-            )
-
-            Text(
-                text = "Weight goal: ${profile.weightGoal?.let { formatWeight(it) } ?: "not set"}",
-                style = MaterialTheme.typography.bodyMedium
-            )
-
-            var weightText by remember { mutableStateOf("") }
-            // Align Log with the right-column buttons (same horizontal alignment as Snacks).
-            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                val gap = 10.dp
-                val cellW = (maxWidth - gap) / 2
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.width(160.dp)) {
-                    // Show the "focused" look by default: keep the label outside the field.
-                    Text(
-                        text = "Log weight (${if (unit == WeightUnit.KG) "kg" else "lb"})",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    OutlinedTextField(
-                        value = weightText,
-                        onValueChange = { raw ->
-                            // Keep this field small: accept up to 4 characters (e.g. "165" / "70.5")
-                            // and restrict to digits + optional dot.
-                            val filtered = raw.filter { it.isDigit() || it == '.' }.take(4)
-                            weightText = filtered
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("165") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                    )
-                }
-                    Spacer(modifier = Modifier.weight(1f))
-                    Box(
-                        modifier = Modifier.width(cellW),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        IconButton(
-                            onClick = {
-                                val w = weightText.toDoubleOrNull() ?: return@IconButton
-                                onLogWeight(w)
-                                weightText = ""
-                            },
-                            enabled = !isProcessing,
-                            // Button starts at center.
-                            modifier = Modifier
-                                // ~15% smaller than 180x96
-                                .size(width = 153.dp, height = 82.dp)
-                                // Nudge down slightly (~10px total)
-                                .offset(y = 10.dp)
-                        ) {
-                            Image(
-                                painter = painterResource(id = R.drawable.btn_log),
-                                contentDescription = "Log",
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
             // (Removed "Lists" label)
-            // 2x2 grid:
-            // Row 1: Meals (left) + Snacks (right)
-            // Row 2: Ingredients (left) + View All (right)
+            // Stacked list buttons (simple vertical layout):
+            // Ingredients (top), Snacks (middle), Meals (bottom)
             BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                val gap = 10.dp
-                val cellW = (maxWidth - gap) / 2
-                val listH = 63.dp
-                val viewH = 68.dp
+                val fullW = maxWidth
+                val listH = 68.dp
 
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(gap),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            AlphaHitImageButton(
-                                resId = R.drawable.btn_meals,
-                                size = DpSize(width = cellW, height = listH),
-                                contentDescription = "Meals",
-                                enabled = !isProcessing,
-                                onClick = { onOpenFoodList("MEAL") }
-                            )
-                        }
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            AlphaHitImageButton(
-                                resId = R.drawable.btn_snacks,
-                                size = DpSize(width = cellW, height = listH),
-                                contentDescription = "Snacks",
-                                enabled = !isProcessing,
-                                onClick = { onOpenFoodList("SNACK") }
-                            )
-                        }
-                    }
+                    AlphaHitImageButton(
+                        resId = R.drawable.btn_ingredients,
+                        size = DpSize(width = fullW, height = listH),
+                        contentDescription = "Ingredients",
+                        enabled = !isProcessing,
+                        onClick = { onOpenFoodList("INGREDIENT") }
+                    )
+                    AlphaHitImageButton(
+                        resId = R.drawable.btn_snacks,
+                        size = DpSize(width = fullW, height = listH),
+                        contentDescription = "Snacks",
+                        enabled = !isProcessing,
+                        onClick = { onOpenFoodList("SNACK") }
+                    )
+                    AlphaHitImageButton(
+                        resId = R.drawable.btn_meals,
+                        size = DpSize(width = fullW, height = listH),
+                        contentDescription = "Meals",
+                        enabled = !isProcessing,
+                        onClick = { onOpenFoodList("MEAL") }
+                    )
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(gap),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            AlphaHitImageButton(
-                                resId = R.drawable.btn_ingredients,
-                                size = DpSize(width = cellW, height = listH),
-                                contentDescription = "Ingredients",
-                                enabled = !isProcessing,
-                                onClick = { onOpenFoodList("INGREDIENT") }
-                            )
-                        }
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            AlphaHitImageButton(
-                                resId = R.drawable.btn_view_all,
-                                size = DpSize(width = cellW, height = viewH),
-                                contentDescription = "View all items",
-                                enabled = !isProcessing,
-                                onClick = { onOpenFoodList(null) }
-                            )
-                        }
-                    }
-
-                    // Sign out centered below the grid (same size as View All).
+                    // Sign out centered below the grid.
                     Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                         AlphaHitImageButton(
                             resId = R.drawable.btn_sign_out,
-                            size = DpSize(width = cellW, height = viewH),
+                            size = DpSize(width = fullW, height = listH),
                             contentDescription = "Sign out",
                             enabled = !isProcessing,
                             onClick = { onSignOut() }

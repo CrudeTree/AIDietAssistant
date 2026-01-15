@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
@@ -88,7 +89,9 @@ fun ChoosePlanScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(24.dp),
+                .padding(24.dp)
+                // Keep the bottom CTA row above the system nav bar.
+                .navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Box(modifier = Modifier.fillMaxWidth()) {
@@ -145,7 +148,7 @@ fun ChoosePlanScreen(
             PlanCard(
                 title = "Free",
                 subtitle = "Good for trying it out",
-                bullets = listOf("5 chats/day", "20 food items"),
+                bullets = listOf("10 chats/day", "20 food items"),
                 selected = selectedTier == SubscriptionTier.FREE,
                 enabled = true,
                 isCurrent = currentTier == SubscriptionTier.FREE,

@@ -21,6 +21,7 @@ private const val SCHEDULES_SUBCOLLECTION = "schedules"
 private const val MESSAGES_DOC_ID = "messageLog"
 private const val CHATS_COLLECTION = "chats"
 private const val CHAT_META_SUBCOLLECTION = "meta"
+private const val CALORIES_SUBCOLLECTION = "calories"
 
 class UserRepository(
     private val db: FirebaseFirestore,
@@ -73,6 +74,14 @@ class UserRepository(
 
     suspend fun updateShowWallpaperFoodIcons(show: Boolean) {
         userDoc.update("showWallpaperFoodIcons", show).await()
+    }
+
+    suspend fun updateShowVineOverlay(show: Boolean) {
+        userDoc.update("showVineOverlay", show).await()
+    }
+
+    suspend fun updateHasSeenBeginnerIngredientsPicker(seen: Boolean) {
+        userDoc.update("hasSeenBeginnerIngredientsPicker", seen).await()
     }
 
     suspend fun updateUiFontSizeSp(fontSizeSp: Float) {
@@ -131,6 +140,86 @@ class UserRepository(
 
     suspend fun updateAutoPilotEnabled(enabled: Boolean) {
         userDoc.update("autoPilotEnabled", enabled).await()
+    }
+}
+
+data class CalorieEntry(
+    val label: String,
+    val calories: Int,
+    val createdAt: Timestamp = Timestamp.now(),
+    val source: String? = "chat"
+)
+
+data class CalorieDaySummary(
+    val dayKey: String = "",
+    val totalCalories: Int = 0,
+    val entryCount: Int = 0,
+    val updatedAt: Timestamp? = null
+)
+
+class CalorieRepository(
+    private val db: FirebaseFirestore,
+    private val userId: String
+) {
+    private val daysCollection get() =
+        db.collection(USERS_COLLECTION).document(userId).collection(CALORIES_SUBCOLLECTION)
+
+    suspend fun getDaySummary(dayKey: String): CalorieDaySummary? {
+        val snap = daysCollection.document(dayKey).get().await()
+        return snap.toObject(CalorieDaySummary::class.java)
+    }
+
+    /**
+     * Append entries for a given dayKey (YYYY-MM-DD in the user's local time).
+     * Uses a transaction to keep the day's total consistent.
+     */
+    suspend fun appendEntries(dayKey: String, entries: List<CalorieEntry>) {
+        if (dayKey.isBlank() || entries.isEmpty()) return
+        val safe = entries
+            .mapNotNull { e ->
+                val c = e.calories
+                val label = e.label.trim()
+                if (label.isBlank()) return@mapNotNull null
+                // Clamp absurd values to avoid corrupting the user's log.
+                val clamped = c.coerceIn(0, 5000)
+                CalorieEntry(label = label, calories = clamped, createdAt = e.createdAt, source = e.source)
+            }
+        if (safe.isEmpty()) return
+
+        val dayRef = daysCollection.document(dayKey)
+        val entriesCol = dayRef.collection("entries")
+        val createdAt = Timestamp.now()
+
+        db.runTransaction { tx ->
+            val daySnap = tx.get(dayRef)
+            val currentTotal = (daySnap.getLong("totalCalories") ?: 0L).toInt()
+            val currentCount = (daySnap.getLong("entryCount") ?: 0L).toInt()
+
+            val addTotal = safe.sumOf { it.calories }
+            safe.forEach { e ->
+                val ref = entriesCol.document()
+                tx.set(
+                    ref,
+                    mapOf(
+                        "label" to e.label,
+                        "calories" to e.calories,
+                        "createdAt" to (e.createdAt ?: createdAt),
+                        "source" to e.source
+                    )
+                )
+            }
+
+            tx.set(
+                dayRef,
+                mapOf(
+                    "dayKey" to dayKey,
+                    "totalCalories" to (currentTotal + addTotal),
+                    "entryCount" to (currentCount + safe.size),
+                    "updatedAt" to createdAt
+                ),
+                SetOptions.merge()
+            )
+        }.await()
     }
 }
 
