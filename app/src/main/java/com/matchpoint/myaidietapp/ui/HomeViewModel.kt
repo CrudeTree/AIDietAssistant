@@ -159,19 +159,33 @@ class HomeViewModel(
         try {
             val authEmail = authRepo.currentEmail()?.trim()?.ifBlank { null }
             // If the user doc doesn't exist yet (new account), auto-create defaults.
-            // We intentionally do NOT require name/weight/goal/diet/fasting setup.
-            val profile = userRepo.getUserProfile() ?: run {
-                val created = UserProfile(
-                    email = authEmail,
-                    _email = authEmail,
-                    dietType = DietType.NO_DIET,
-                    showVineOverlay = false,
-                    fastingPreset = FastingPreset.NONE,
-                    eatingWindowStartMinutes = null,
-                    eatingWindowEndMinutes = null
+            // NOTE: tutorial progress writes can create the user doc early with only tutorial fields.
+            // In that case, we still treat the profile as "not initialized" and write full defaults once.
+            val userDocRef = db.collection("users").document(userId)
+            val snap = userDocRef.get().await()
+            val loaded = snap.toObject(UserProfile::class.java)
+            val isProfileInitialized = snap.exists() && (
+                snap.contains("subscriptionTier") ||
+                    snap.contains("dietType") ||
+                    snap.contains("showFoodIcons") ||
+                    snap.contains("hasSeenWelcomeIntro")
+                )
+
+            val profile = if (!snap.exists() || loaded == null || !isProfileInitialized) {
+                val base = loaded ?: UserProfile()
+                val created = base.copy(
+                    email = authEmail ?: base.email,
+                    _email = authEmail ?: base._email,
+                    dietType = base.dietType,
+                    showVineOverlay = base.showVineOverlay,
+                    fastingPreset = base.fastingPreset,
+                    eatingWindowStartMinutes = base.eatingWindowStartMinutes,
+                    eatingWindowEndMinutes = base.eatingWindowEndMinutes
                 )
                 userRepo.saveUserProfile(created)
                 created
+            } else {
+                loaded
             }
 
             // Backfill email for existing users (helps identify accounts in Firestore console).
