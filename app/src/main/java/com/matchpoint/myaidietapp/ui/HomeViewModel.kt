@@ -109,6 +109,7 @@ class HomeViewModel(
     private val quotaManager: com.matchpoint.myaidietapp.data.DailyQuotaManager? = null,
     private val reviewPromptManager: com.matchpoint.myaidietapp.data.ReviewPromptManager? = null
 ) : ViewModel() {
+    private var lastTutorialProgressSent: Int? = null
     private fun normalizeFoodNameKey(s: String?): String {
         return (s ?: "")
             .trim()
@@ -156,10 +157,13 @@ class HomeViewModel(
 
     private suspend fun bootstrap() {
         try {
+            val authEmail = authRepo.currentEmail()?.trim()?.ifBlank { null }
             // If the user doc doesn't exist yet (new account), auto-create defaults.
             // We intentionally do NOT require name/weight/goal/diet/fasting setup.
             val profile = userRepo.getUserProfile() ?: run {
                 val created = UserProfile(
+                    email = authEmail,
+                    _email = authEmail,
                     dietType = DietType.NO_DIET,
                     showVineOverlay = false,
                     fastingPreset = FastingPreset.NONE,
@@ -168,6 +172,11 @@ class HomeViewModel(
                 )
                 userRepo.saveUserProfile(created)
                 created
+            }
+
+            // Backfill email for existing users (helps identify accounts in Firestore console).
+            if (!authEmail.isNullOrBlank() && (profile.email.isNullOrBlank() || profile._email.isNullOrBlank())) {
+                runCatching { userRepo.saveUserProfile(profile.copy(email = authEmail, _email = authEmail)) }
             }
 
             val todayDate = LocalDate.now(zoneId)
@@ -404,9 +413,9 @@ class HomeViewModel(
 
     private fun foodListLimitFor(tier: SubscriptionTier): Int {
         return when (tier) {
-            SubscriptionTier.FREE -> 20
-            SubscriptionTier.REGULAR -> 100
-            SubscriptionTier.PRO -> 500
+            SubscriptionTier.FREE -> 10
+            SubscriptionTier.REGULAR -> 50
+            SubscriptionTier.PRO -> 1000
         }
     }
 
@@ -417,15 +426,42 @@ class HomeViewModel(
 
         val upsell = when (profile.subscriptionTier) {
             SubscriptionTier.FREE ->
-                "Upgrade to Basic for \$9.99/month (\$99.99/year) for up to 100 items, or Premium for \$19.99/month (\$199.99/year) for up to 500 items."
+                "Upgrade to Basic for \$9.99/month (\$99.99/year) for up to 50 items, or Premium for \$19.99/month (\$199.99/year) for up to 1000 items."
             SubscriptionTier.REGULAR ->
-                "Upgrade to Premium for \$19.99/month (\$199.99/year) to raise your limit to 500 items."
+                "Upgrade to Premium for \$19.99/month (\$199.99/year) to raise your limit to 1000 items."
             SubscriptionTier.PRO ->
                 "You’ve hit the Premium item limit."
         }
 
         _uiState.value = _uiState.value.copy(
             planGateNotice = "You’ve reached your plan’s food list limit ($current/$limit).\n\n$upsell"
+        )
+        return false
+    }
+
+    private fun recipeLimitFor(tier: SubscriptionTier): Int {
+        return when (tier) {
+            SubscriptionTier.FREE -> 3
+            SubscriptionTier.REGULAR -> 15
+            SubscriptionTier.PRO -> 500
+        }
+    }
+
+    private fun checkRecipeListLimitOrPrompt(profile: UserProfile, currentSaved: Int, addingCount: Int = 1): Boolean {
+        val limit = recipeLimitFor(profile.subscriptionTier)
+        if (currentSaved + addingCount <= limit) return true
+
+        val upsell = when (profile.subscriptionTier) {
+            SubscriptionTier.FREE ->
+                "Upgrade to Basic for \$9.99/month (\$99.99/year) for up to 15 saved recipes, or Premium for \$19.99/month (\$199.99/year) for up to 500 saved recipes."
+            SubscriptionTier.REGULAR ->
+                "Upgrade to Premium for \$19.99/month (\$199.99/year) to raise your limit to 500 saved recipes."
+            SubscriptionTier.PRO ->
+                "You’ve hit the Premium saved recipe limit."
+        }
+
+        _uiState.value = _uiState.value.copy(
+            planGateNotice = "You’ve reached your plan’s saved recipe limit ($currentSaved/$limit).\n\n$upsell"
         )
         return false
     }
@@ -558,6 +594,49 @@ class HomeViewModel(
             val current = userRepo.getUserProfile() ?: return
             val diet = current.dietType
 
+            // Fast path: if this item already exists in the user's list, update it locally WITHOUT AI analysis.
+            // This prevents consuming quota / hitting daily limits when the user is just re-adding something.
+            // Only safe for text-entry adds (no photos), since photo adds often need analysis to normalize the name.
+            if (productUrl == null) {
+                val q = nameQualifier
+                    ?.trim()
+                    ?.lowercase()
+                    ?.replace(Regex("\\s+"), " ")
+                    ?.takeIf { it.isNotBlank() }
+                val baseName = name.trim()
+                val candidateName = if (q == null) baseName else "$baseName ($q)"
+                val candidateKey = normalizeFoodNameKey(candidateName)
+                val existingIdx = current.foodItems.indexOfFirst { fi ->
+                    normalizeFoodNameKey(fi.name) == candidateKey
+                }
+                if (existingIdx >= 0) {
+                    val cats = categories.map { it.trim().uppercase() }.distinct()
+                    val existing = current.foodItems[existingIdx]
+                    val updatedItem = existing.copy(
+                        quantity = (existing.quantity + quantity).coerceAtLeast(1),
+                        categories = (existing.categories + cats).map { it.trim().uppercase() }.distinct(),
+                        photoUrl = existing.photoUrl,
+                        labelUrl = existing.labelUrl,
+                        nutritionFactsUrl = existing.nutritionFactsUrl
+                    )
+                    val updatedList = current.foodItems.toMutableList().also { it[existingIdx] = updatedItem }
+                    val updatedProfile = current.copy(foodItems = updatedList)
+                    userRepo.saveUserProfile(updatedProfile)
+                    messagesRepo.appendMessage(
+                        MessageEntry(
+                            id = UUID.randomUUID().toString(),
+                            sender = MessageSender.AI,
+                            text = "Already had '${existing.name}'. Increased quantity to x${updatedItem.quantity}."
+                        )
+                    )
+                    _uiState.value = _uiState.value.copy(
+                        profile = updatedProfile,
+                        messages = messagesRepo.getMessageLog().log
+                    )
+                    return
+                }
+            }
+
             val analysisAttempt = runCatching {
                 if (productUrl != null) {
                     proxyRepo.analyzeFood(
@@ -594,7 +673,7 @@ class HomeViewModel(
                 val debugMessage = buildString {
                     append("Food '")
                     append(analysis.normalizedName)
-                    append("' — health ")
+                    append("', health ")
                     append(healthRating)
                     append("/10, diet fit ")
                     append(dietFitRating)
@@ -1073,6 +1152,31 @@ class HomeViewModel(
         }
     }
 
+    /**
+     * Tutorial analytics: record how far the user got in the guided tour.
+     * We store a simple "X/32" style value in Firestore so you can monitor drop-off.
+     */
+    fun updateTutorialProgress(maxStepReached: Int, totalSteps: Int = 32) {
+        val clamped = maxStepReached.coerceIn(0, totalSteps)
+        if (lastTutorialProgressSent == clamped) return
+        lastTutorialProgressSent = clamped
+
+        viewModelScope.launch {
+            runCatching {
+                userRepo.updateTutorialProgress(
+                    progressSteps = clamped,
+                    totalSteps = totalSteps,
+                    progressText = "$clamped/$totalSteps"
+                )
+                val updated = userRepo.getUserProfile()
+                _uiState.value = _uiState.value.copy(profile = updated)
+            }.onFailure { e ->
+                // Best-effort analytics: don't surface as a user-facing error.
+                Log.w("HomeViewModel", "Failed to update tutorial progress", e)
+            }
+        }
+    }
+
     fun updateUiFontSizeSp(fontSizeSp: Float) {
         viewModelScope.launch {
             try {
@@ -1272,6 +1376,13 @@ class HomeViewModel(
                     activeChatId = messagesRepo.getActiveChatId()
                 )
 
+                // Shortcut: user wants to "save these options" (e.g., a meal plan) — do it locally
+                // without consuming another AI request / daily quota.
+                if (trySaveMealPlanOptionsLocally(userMessage = message)) {
+                    _uiState.value = _uiState.value.copy(isProcessing = false)
+                    return@launch
+                }
+
                 val currentProfile = userRepo.getUserProfile()
                 val lastMeal = currentProfile?.mealHistory?.maxByOrNull { it.timestamp }
                 val hungerLevels = currentProfile?.hungerSignals?.map { it.level } ?: emptyList()
@@ -1387,6 +1498,149 @@ class HomeViewModel(
                 _uiState.value = _uiState.value.copy(isProcessing = false)
             }
         }
+    }
+
+    private suspend fun trySaveMealPlanOptionsLocally(userMessage: String): Boolean {
+        val t = userMessage.trim().lowercase()
+        if (t.isBlank()) return false
+        // Conservative: only trigger on explicit "save" intent + "options/plan" hint.
+        val wantsSave = Regex("\\b(save|add|put)\\b").containsMatchIn(t)
+        val mentionsOptions = Regex("\\b(options?|plan|meal\\s+plan)\\b").containsMatchIn(t)
+        if (!wantsSave || !mentionsOptions) return false
+
+        // Find the most recent AI message that looks like a meal plan/options list (and isn't a quota error).
+        val priorAi = _uiState.value.messages
+            .asReversed()
+            .firstOrNull { m ->
+                m.sender == MessageSender.AI &&
+                    m.kind != "RECIPE" &&
+                    m.text.isNotBlank() &&
+                    !m.text.contains("Daily limit reached", ignoreCase = true) &&
+                    !m.text.contains("Service unavailable", ignoreCase = true)
+            }
+            ?: return false
+
+        val options = extractMealPlanOptions(priorAi.text)
+        if (options.isEmpty()) return false
+
+        return try {
+            val profile = userRepo.getUserProfile() ?: return true
+
+            // Only add new unique items.
+            val existingKeys = profile.foodItems.map { normalizeFoodNameKey(it.name) }.toSet()
+            val toAdd = options
+                .map { (name, cat) ->
+                    val cleanName = name.trim().replace(Regex("\\s+"), " ").take(120)
+                    val cleanCat = cat.trim().uppercase()
+                    cleanName to cleanCat
+                }
+                .filter { (name, _) -> name.isNotBlank() }
+                .distinctBy { (name, cat) -> normalizeFoodNameKey(name) + "|" + cat }
+                .filter { (name, _) -> normalizeFoodNameKey(name) !in existingKeys }
+
+            if (toAdd.isEmpty()) {
+                messagesRepo.appendMessage(
+                    MessageEntry(
+                        id = UUID.randomUUID().toString(),
+                        sender = MessageSender.AI,
+                        text = "Those are already in your list."
+                    )
+                )
+                _uiState.value = _uiState.value.copy(messages = messagesRepo.getMessageLog().log)
+                return true
+            }
+
+            if (!checkFoodListLimitOrPrompt(profile, addingCount = toAdd.size)) {
+                // Also add a short chat message so the user sees why the save didn't happen.
+                messagesRepo.appendMessage(
+                    MessageEntry(
+                        id = UUID.randomUUID().toString(),
+                        sender = MessageSender.AI,
+                        text = "Can’t save those options because your food list is full. Upgrade to add more."
+                    )
+                )
+                _uiState.value = _uiState.value.copy(messages = messagesRepo.getMessageLog().log)
+                return true
+            }
+
+            val newItems = toAdd.map { (name, cat) ->
+                FoodItem(
+                    id = UUID.randomUUID().toString(),
+                    name = name,
+                    quantity = 1,
+                    categories = listOf(cat)
+                )
+            }
+
+            val updated = profile.copy(foodItems = profile.foodItems + newItems)
+            userRepo.saveUserProfile(updated)
+
+            messagesRepo.appendMessage(
+                MessageEntry(
+                    id = UUID.randomUUID().toString(),
+                    sender = MessageSender.AI,
+                    text = "Saved ${newItems.size} item(s) to your list."
+                )
+            )
+
+            _uiState.value = _uiState.value.copy(
+                profile = updated,
+                messages = messagesRepo.getMessageLog().log
+            )
+            true
+        } catch (e: Exception) {
+            // If anything goes wrong, fall back to normal AI handling.
+            false
+        }
+    }
+
+    private fun extractMealPlanOptions(text: String): List<Pair<String, String>> {
+        val cleaned = text
+            .replace("\r", "")
+            .replace("**", "")
+            .trim()
+        if (cleaned.isBlank()) return emptyList()
+
+        val results = mutableListOf<Pair<String, String>>()
+
+        // First pass: split numbered list items ("1. ... 2. ...").
+        val parts = cleaned
+            .split(Regex("\\s*\\d+\\.\\s*"))
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+
+        fun categoryForLabel(label: String): String {
+            val l = label.trim().lowercase()
+            return if (l.startsWith("snack")) "SNACK" else "MEAL"
+        }
+
+        fun addFromChunk(chunk: String) {
+            // Expected shape: "Breakfast: X", "Lunch: Y", "Dinner: Z", "Snacks: A"
+            val m = Regex("^(Breakfast|Lunch|Dinner|Snacks?)\\s*:\\s*(.+)$", RegexOption.IGNORE_CASE)
+                .find(chunk.trim())
+                ?: return
+            val label = m.groupValues[1]
+            val value = m.groupValues[2].trim()
+            val name = value.substringBefore("\n").substringBefore(".").trim()
+            if (name.isBlank()) return
+            results.add(name to categoryForLabel(label))
+        }
+
+        parts.forEach { addFromChunk(it) }
+
+        // Fallback: scan inline if the AI wrote everything in one paragraph.
+        if (results.isEmpty()) {
+            val re = Regex("\\b(Breakfast|Lunch|Dinner|Snacks?)\\b\\s*:\\s*([^\\n\\.]+)", RegexOption.IGNORE_CASE)
+            re.findAll(cleaned).forEach { m ->
+                val label = m.groupValues[1]
+                val name = m.groupValues[2].trim()
+                if (name.isNotBlank()) results.add(name to categoryForLabel(label))
+            }
+        }
+
+        return results
+            .distinctBy { (name, cat) -> normalizeFoodNameKey(name) + "|" + cat }
+            .take(12)
     }
 
     // (Removed legacy PendingFoodAdd / regex intent logic in favor of <APP_ACTION> protocol.)
@@ -1829,7 +2083,7 @@ class HomeViewModel(
                     id = UUID.randomUUID().toString(),
                     sender = MessageSender.AI,
                     text = cleanedReplyText,
-                    kind = "RECIPE"
+                    kind = if (replyResult.isSuccess) "RECIPE" else null
                 )
                 messagesRepo.appendMessage(aiEntry)
 
@@ -1846,6 +2100,7 @@ class HomeViewModel(
     fun saveRecipeFromMessage(messageId: String) {
         viewModelScope.launch {
             try {
+                val profile = userRepo.getUserProfile() ?: return@launch
                 val msg = _uiState.value.messages.firstOrNull { it.id == messageId }
                     ?: run { _uiState.value = _uiState.value.copy(error = "Recipe message not found."); return@launch }
 
@@ -1856,6 +2111,9 @@ class HomeViewModel(
 
                 // Idempotent-ish: don't re-save the same chat recipe message.
                 if (_uiState.value.savedRecipes.any { it.id == msg.id || it.sourceMessageId == msg.id }) return@launch
+
+                val currentSaved = _uiState.value.savedRecipes.size
+                if (!checkRecipeListLimitOrPrompt(profile, currentSaved = currentSaved, addingCount = 1)) return@launch
 
                 val parsed = RecipeParser.parse(msg.text)
                 val recipe = SavedRecipe(
@@ -1888,6 +2146,7 @@ class HomeViewModel(
     fun saveDailyPlanMeal(mealId: String) {
         viewModelScope.launch {
             try {
+                val profile = userRepo.getUserProfile() ?: return@launch
                 val meal = _uiState.value.dailyPlanMeals.firstOrNull { it.id == mealId }
                     ?: run { _uiState.value = _uiState.value.copy(error = "Meal not found."); return@launch }
 
@@ -1910,6 +2169,9 @@ class HomeViewModel(
                     _uiState.value = _uiState.value.copy(messages = messagesRepo.getMessageLog().log)
                     return@launch
                 }
+
+                val currentSaved = _uiState.value.savedRecipes.size
+                if (!checkRecipeListLimitOrPrompt(profile, currentSaved = currentSaved, addingCount = 1)) return@launch
 
                 val recipe = SavedRecipe(
                     id = UUID.randomUUID().toString(),
@@ -2011,7 +2273,7 @@ class HomeViewModel(
                 val message = buildString {
                     append("Grocery scan: '")
                     append(analysis.normalizedName)
-                    append("' — health ")
+                    append("', health ")
                     append(health)
                     append("/10")
                     if (diet != DietType.NO_DIET && dietFit != null) {
@@ -2157,7 +2419,7 @@ class HomeViewModel(
                     MessageEntry(
                         id = UUID.randomUUID().toString(),
                         sender = MessageSender.AI,
-                        text = "Cool — leaving it out."
+                        text = "Cool, leaving it out."
                     )
                 )
                 _uiState.value = _uiState.value.copy(

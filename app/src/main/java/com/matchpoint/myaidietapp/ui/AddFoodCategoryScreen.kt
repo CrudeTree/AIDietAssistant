@@ -10,6 +10,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.zIndex
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Icon
@@ -30,18 +38,24 @@ import com.matchpoint.myaidietapp.R
 @Composable
 fun AddFoodCategoryScreen(
     enabled: Boolean,
+    tutorialManager: HomeTutorialManager,
     onPickMeals: () -> Unit,
     onPickSnacks: () -> Unit,
     onPickIngredients: () -> Unit,
     onBack: () -> Unit
 ) {
+    val tutorialStep = tutorialManager.step()
+    val tutorialActive = tutorialManager.shouldShow() && tutorialStep == 3
+    var rectIngredients by remember { mutableStateOf<Rect?>(null) }
+
     Surface {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
             Box(modifier = Modifier.fillMaxWidth()) {
                 IconButton(
                     onClick = onBack,
@@ -81,13 +95,19 @@ fun AddFoodCategoryScreen(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    AlphaHitImageButton(
-                        resId = R.drawable.btn_ingredients,
-                        size = DpSize(width = fullW, height = listH),
-                        contentDescription = "Ingredients",
-                        enabled = enabled,
-                        onClick = onPickIngredients
-                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onGloballyPositioned { coords -> rectIngredients = coords.boundsInRoot() }
+                    ) {
+                        AlphaHitImageButton(
+                            resId = R.drawable.btn_ingredients,
+                            size = DpSize(width = fullW, height = listH),
+                            contentDescription = "Ingredients",
+                            enabled = enabled,
+                            onClick = onPickIngredients
+                        )
+                    }
                     AlphaHitImageButton(
                         resId = R.drawable.btn_snacks,
                         size = DpSize(width = fullW, height = listH),
@@ -103,6 +123,31 @@ fun AddFoodCategoryScreen(
                         onClick = onPickMeals
                     )
                 }
+            }
+            }
+
+            if (tutorialActive) {
+                CoachMarkOverlay(
+                    steps = listOf(
+                        CoachStep(
+                            title = "AI Diet Assistant",
+                            body = "Great job! Here you can add ingredients, snacks, or even meals for me to access and evaluate. Let’s start by adding an ingredient!",
+                            targetRect = { rectIngredients },
+                            cardPosition = CoachCardPosition.BOTTOM,
+                            showRobotHead = true,
+                            typewriterBody = true,
+                            allowTargetTapToAdvance = true,
+                            hideNextButton = true,
+                            onTargetTap = {
+                                tutorialManager.setStep(4)
+                                onPickIngredients()
+                            }
+                        )
+                    ),
+                    onSkip = { tutorialManager.markDone() },
+                    onComplete = { /* tap-to-advance */ },
+                    modifier = Modifier.zIndex(10000f)
+                )
             }
         }
     }

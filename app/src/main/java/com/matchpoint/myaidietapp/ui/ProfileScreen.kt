@@ -45,11 +45,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.zIndex
 import com.matchpoint.myaidietapp.model.SavedRecipe
 import com.matchpoint.myaidietapp.model.SubscriptionTier
 import com.matchpoint.myaidietapp.model.UserProfile
@@ -73,10 +77,19 @@ fun ProfileScreen(
     errorText: String?,
     onOpenRecipe: (SavedRecipe) -> Unit,
     onOpenSettings: () -> Unit,
-    wallpaperSeed: Int
+    wallpaperSeed: Int,
+    tutorialManager: HomeTutorialManager
 ) {
     val tier = displayTier
     val context = LocalContext.current
+    val tutActive = tutorialManager.shouldShow()
+    val tutStep = tutorialManager.step()
+    val inProfileTut = tutActive && tutStep in 25..28
+
+    var rectLists by remember { mutableStateOf<Rect?>(null) }
+    var rectRecipes by remember { mutableStateOf<Rect?>(null) }
+    var rectUpgrade by remember { mutableStateOf<Rect?>(null) }
+    var rectSettings by remember { mutableStateOf<Rect?>(null) }
 
     Surface {
         Box(modifier = Modifier.fillMaxSize()) {
@@ -122,6 +135,7 @@ fun ProfileScreen(
                         .align(Alignment.CenterEnd)
                         .offset(x = 16.dp)
                         .size(98.dp)
+                        .onGloballyPositioned { coords -> rectSettings = coords.boundsInRoot() }
                 ) {
                     Image(
                         painter = painterResource(id = R.drawable.gear),
@@ -149,9 +163,9 @@ fun ProfileScreen(
                 val cellW = (maxWidth - gap) / 2
                 // Food list usage (tier-based caps)
                 val foodLimit = when (tier) {
-                    SubscriptionTier.FREE -> 20
-                    SubscriptionTier.REGULAR -> 100
-                    SubscriptionTier.PRO -> 500
+                    SubscriptionTier.FREE -> 10
+                    SubscriptionTier.REGULAR -> 50
+                    SubscriptionTier.PRO -> 1000
                 }
                 // Left side: plan text + badge
                 Column(
@@ -197,6 +211,7 @@ fun ProfileScreen(
                         .width(cellW),
                     contentAlignment = Alignment.Center
                 ) {
+                    Box(modifier = Modifier.onGloballyPositioned { coords -> rectUpgrade = coords.boundsInRoot() }) {
                     AlphaHitImageButton(
                         resId = R.drawable.upgrade,
                         size = DpSize(width = 383.dp, height = 144.dp),
@@ -205,6 +220,7 @@ fun ProfileScreen(
                         visualScale = 1.5f,
                         onClick = onOpenChoosePlan
                     )
+                    }
                 }
             }
 
@@ -254,6 +270,7 @@ fun ProfileScreen(
                         .width(cellW),
                     contentAlignment = Alignment.Center
                 ) {
+                    Box(modifier = Modifier.onGloballyPositioned { coords -> rectRecipes = coords.boundsInRoot() }) {
                     AlphaHitImageButton(
                         resId = R.drawable.btn_recipes,
                         size = recipeBtnSize,
@@ -262,6 +279,7 @@ fun ProfileScreen(
                         visualScale = 1.5f,
                         onClick = { onOpenRecipeList() }
                     )
+                    }
                 }
             }
             Spacer(modifier = Modifier.height(4.dp))
@@ -274,7 +292,10 @@ fun ProfileScreen(
                 val listH = 68.dp
 
                 Column(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // Use the whole column as the "Lists" highlight target for the tutorial.
+                        .onGloballyPositioned { coords -> rectLists = coords.boundsInRoot() },
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     AlphaHitImageButton(
@@ -315,5 +336,83 @@ fun ProfileScreen(
             // No explicit Back button: system back returns to AI Food Coach.
         }
         }
+
+            // Tutorial overlay for Profile screen (steps 25–28).
+            if (inProfileTut) {
+                val step = tutStep
+                val msg: String
+                val targetProvider: () -> Rect?
+                val hideNext: Boolean
+                val allowTap: Boolean
+                val cardPos: CoachCardPosition
+                val onTap: (() -> Unit)?
+
+                when (step) {
+                    25 -> {
+                        msg = "Great! Here is your profile page. Here you access all your lists you’ve created."
+                        targetProvider = { rectLists }
+                        hideNext = false
+                        allowTap = false
+                        cardPos = CoachCardPosition.TOP
+                        onTap = null
+                    }
+                    26 -> {
+                        msg = "Or access your recipes you’ve created."
+                        targetProvider = { rectRecipes }
+                        hideNext = false
+                        allowTap = false
+                        cardPos = CoachCardPosition.TOP
+                        onTap = null
+                    }
+                    27 -> {
+                        msg = "You can even upgrade and get access to more features."
+                        targetProvider = { rectUpgrade }
+                        hideNext = false
+                        allowTap = false
+                        cardPos = CoachCardPosition.TOP
+                        onTap = null
+                    }
+                    else -> {
+                        msg = "One last thing, let’s quickly view your settings page."
+                        targetProvider = { rectSettings }
+                        hideNext = true
+                        allowTap = true
+                        // Keep the dialog away from the top-right settings target.
+                        cardPos = CoachCardPosition.BOTTOM
+                        onTap = {
+                            // Jump to the Settings tutorial start.
+                            tutorialManager.setStep(30)
+                            onOpenSettings()
+                        }
+                    }
+                }
+
+                CoachMarkOverlay(
+                    steps = listOf(
+                        CoachStep(
+                            title = "AI Diet Assistant",
+                            body = msg,
+                            targetRect = targetProvider,
+                            cardPosition = cardPos,
+                            showRobotHead = true,
+                            typewriterBody = true,
+                            allowNullTarget = true,
+                            allowTargetTapToAdvance = allowTap,
+                            hideNextButton = hideNext,
+                            onTargetTap = onTap
+                        )
+                    ),
+                    onSkip = {
+                        tutorialManager.requestSkipConfirm {
+                            tutorialManager.markDone()
+                        }
+                    },
+                    onComplete = {
+                        // Only advance via Next on the non-tap steps.
+                        if (step in 25..27) tutorialManager.setStep(step + 1)
+                    },
+                    modifier = Modifier.zIndex(10000f)
+                )
+            }
     }
 }

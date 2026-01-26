@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -27,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,8 +36,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -49,6 +54,23 @@ import com.matchpoint.myaidietapp.R
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.ui.zIndex
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.height
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.window.Dialog
+import androidx.compose.foundation.shape.RoundedCornerShape
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -59,6 +81,7 @@ fun FoodListScreen(
     totalLimit: Int,
     showFoodIcons: Boolean = true,
     fontSizeSp: Float = 18f,
+    tutorialManager: HomeTutorialManager,
     onRemoveFood: (String) -> Unit,
     onUpdateCategories: (foodId: String, categories: Set<String>) -> Unit,
     onAddText: (category: String) -> Unit,
@@ -66,6 +89,11 @@ fun FoodListScreen(
     onOpenAddFoodHub: () -> Unit,
     onBack: () -> Unit
 ) {
+    val tutorialStep = tutorialManager.step()
+    val isIngredientsPage = filterCategory?.trim()?.equals("INGREDIENT", ignoreCase = true) == true
+    val tutorialActive = tutorialManager.shouldShow() && isIngredientsPage
+    var rectAddButton by remember { mutableStateOf<Rect?>(null) }
+
     var editing by remember { mutableStateOf<FoodItem?>(null) }
     var editMeal by remember { mutableStateOf(false) }
     var editIngredient by remember { mutableStateOf(false) }
@@ -131,6 +159,7 @@ fun FoodListScreen(
                     },
                     modifier = Modifier
                         .align(Alignment.CenterEnd)
+                        .onGloballyPositioned { coords -> rectAddButton = coords.boundsInRoot() }
                         .size(56.dp)
                 ) {
                     Image(
@@ -215,7 +244,7 @@ fun FoodListScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                return@Surface
+                // Keep rendering so the Add button (and tutorial overlay) still work for new users.
             }
 
             LazyColumn(
@@ -380,30 +409,111 @@ fun FoodListScreen(
 
     if (showAddChooser) {
         val cat = filterCategory?.trim()?.uppercase() ?: "SNACK"
-        AlertDialog(
-            onDismissRequest = { showAddChooser = false },
-            title = { Text("Add to ${when (cat) { "MEAL" -> "Meals"; "INGREDIENT" -> "Ingredients"; else -> "Snacks" }}") },
-            text = { Text("How do you want to add it?") },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showAddChooser = false
-                        onAddText(cat)
+        if (tutorialActive && tutorialStep == 5 && cat == "INGREDIENT") {
+            // Tutorial version: keep the tutorial message inside the popup so the dialog scrim
+            // doesn't "dim" the tutorial itself.
+            Dialog(onDismissRequest = { /* block outside dismiss during tutorial */ }) {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Add to Ingredients",
+                                fontWeight = FontWeight.SemiBold,
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            TextButton(
+                                onClick = {
+                                    showAddChooser = false
+                                    tutorialManager.markDone()
+                                }
+                            ) { Text("Skip") }
+                        }
+
+                        // Robot tutorial message (typewriter)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Image(
+                                painter = painterResource(id = R.drawable.robot_head),
+                                contentDescription = null,
+                                modifier = Modifier.size(40.dp),
+                                contentScale = ContentScale.Fit
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text("AI Diet Assistant", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleSmall)
+                        }
+
+                        TypewriterTutorialText(
+                            fullText = "You can add ingredients by either text or taking a photo. But for now, let’s just add it by text.",
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val green = Color(0xFF22C55E)
+                            Button(
+                                onClick = {
+                                    showAddChooser = false
+                                    tutorialManager.setStep(6)
+                                    onAddText("INGREDIENT")
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = green)
+                            ) {
+                                Text("Text", color = Color.White, fontWeight = FontWeight.SemiBold)
+                            }
+
+                            Button(
+                                onClick = { /* disabled during tutorial */ },
+                                enabled = false
+                            ) { Text("Photos") }
+                        }
+
+                        Text(
+                            text = "Tip: You can add photos later any time.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Start
+                        )
                     }
-                ) { Text("Text") }
-            },
-            dismissButton = {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                }
+            }
+        } else {
+            AlertDialog(
+                onDismissRequest = { showAddChooser = false },
+                title = { Text("Add to ${when (cat) { "MEAL" -> "Meals"; "INGREDIENT" -> "Ingredients"; else -> "Snacks" }}") },
+                text = { Text("How do you want to add it?") },
+                confirmButton = {
                     Button(
                         onClick = {
                             showAddChooser = false
-                            onAddPhotos(cat)
+                            onAddText(cat)
                         }
-                    ) { Text("Photos") }
-                    Button(onClick = { showAddChooser = false }) { Text("Cancel") }
+                    ) { Text("Text") }
+                },
+                dismissButton = {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                showAddChooser = false
+                                onAddPhotos(cat)
+                            }
+                        ) { Text("Photos") }
+                        Button(onClick = { showAddChooser = false }) { Text("Cancel") }
+                    }
                 }
-            }
-        )
+            )
+        }
     }
 
     editing?.let { item ->
@@ -445,6 +555,63 @@ fun FoodListScreen(
             }
         )
     }
+
+    if (tutorialActive) {
+        when (tutorialStep) {
+            4 -> CoachMarkOverlay(
+                steps = listOf(
+                    CoachStep(
+                        title = "AI Diet Assistant",
+                        body = "Perfect! This is where your ingredients list is stored. Now tap the Add button in the top right corner.",
+                        targetRect = { rectAddButton },
+                        cardPosition = CoachCardPosition.BOTTOM,
+                        showRobotHead = true,
+                        typewriterBody = true,
+                        allowTargetTapToAdvance = true,
+                        hideNextButton = true,
+                        onTargetTap = {
+                            showAddChooser = true
+                            tutorialManager.setStep(5)
+                        }
+                    )
+                ),
+                onSkip = { tutorialManager.markDone() },
+                onComplete = { /* tap-to-advance */ },
+                modifier = Modifier.zIndex(10000f)
+            )
+            5 -> if (showAddChooser) {
+                // Step 5 is rendered inside the "Add to Ingredients" popup so it won't be dimmed by the dialog scrim.
+            }
+        }
+    }
+}
+
+@Composable
+private fun TypewriterTutorialText(
+    fullText: String,
+    modifier: Modifier = Modifier
+) {
+    var shown by remember(fullText) { mutableStateOf("") }
+    LaunchedEffect(fullText) {
+        shown = ""
+        for (i in fullText.indices) {
+            shown = fullText.substring(0, i + 1)
+            // Pause on "..." for readability.
+            if (i >= 2 && fullText[i - 2] == '.' && fullText[i - 1] == '.' && fullText[i] == '.') {
+                delay(1500L)
+            } else if (fullText[i] == '…') {
+                delay(1500L)
+            } else {
+                delay(12L)
+            }
+        }
+    }
+    Text(
+        text = shown,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier
+    )
 }
 
 

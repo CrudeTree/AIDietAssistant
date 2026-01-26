@@ -33,8 +33,8 @@ android {
         applicationId = "com.myaidiet.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 35
-        versionName = "1.0.8"
+        versionCode = 40
+        versionName = "1.1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -126,10 +126,10 @@ dependencies {
     // RevenueCat (subscriptions + receipt validation + restores)
     implementation("com.revenuecat.purchases:purchases:9.1.0")
 
-    // Google Play Billing Library (Play policy requires v7.0.0+).
-    // RevenueCat depends on Billing transitively; we pin the version to ensure compliance.
-    implementation("com.android.billingclient:billing:7.1.1")
-    implementation("com.android.billingclient:billing-ktx:7.1.1")
+    // Google Play Billing Library.
+    // RevenueCat 9.x depends on Billing transitively; we pin the version to match RevenueCat's requirement.
+    implementation("com.android.billingclient:billing:8.0.0")
+    implementation("com.android.billingclient:billing-ktx:8.0.0")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
@@ -144,8 +144,8 @@ dependencies {
 configurations.configureEach {
     resolutionStrategy {
         force(
-            "com.android.billingclient:billing:7.1.1",
-            "com.android.billingclient:billing-ktx:7.1.1"
+            "com.android.billingclient:billing:8.0.0",
+            "com.android.billingclient:billing-ktx:8.0.0"
         )
     }
 }

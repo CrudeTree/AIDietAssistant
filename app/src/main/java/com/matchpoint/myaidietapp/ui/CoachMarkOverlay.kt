@@ -8,11 +8,17 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.Image
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -25,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,51 +44,69 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.painterResource
+import kotlinx.coroutines.delay
 
 data class CoachStep(
     val title: String,
     val body: String,
     val targetRect: () -> Rect?,
-    val cardPosition: CoachCardPosition = CoachCardPosition.BOTTOM
+    val cardPosition: CoachCardPosition = CoachCardPosition.BOTTOM,
+    val cardOffsetY: Dp = 0.dp,
+    val primaryButtonText: String? = null,
+    val showRobotHead: Boolean = false,
+    val typewriterBody: Boolean = false,
+    val allowNullTarget: Boolean = false,
+    val allowTargetTapToAdvance: Boolean = false,
+    val onTargetTap: (() -> Unit)? = null,
+    val hideNextButton: Boolean = false
 )
 
 enum class CoachCardPosition {
     TOP,
+    TOP_START,
     BOTTOM
 }
 
 @Composable
 fun CoachMarkOverlay(
     steps: List<CoachStep>,
-    onDone: () -> Unit,
+    onSkip: () -> Unit,
+    onComplete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     if (steps.isEmpty()) return
 
     var index by remember { mutableIntStateOf(0) }
-    var lastSeenValidIndex by remember { mutableStateOf<Int?>(null) }
 
     fun moveNext() {
-        // Skip steps that don't have a rect yet.
-        var i = index + 1
-        while (i < steps.size && steps[i].targetRect() == null) i++
-        if (i >= steps.size) onDone() else index = i
+        val i = index + 1
+        if (i >= steps.size) onComplete() else index = i
     }
 
     fun moveToFirstValid() {
+        // Show the first step even if it doesn't have a target (allowNullTarget),
+        // otherwise find the first step that has a target rect.
         var i = 0
-        while (i < steps.size && steps[i].targetRect() == null) i++
-        if (i >= steps.size) onDone() else index = i
+        while (i < steps.size) {
+            val s = steps[i]
+            val hasTarget = s.targetRect() != null
+            if (hasTarget || s.allowNullTarget) break
+            i++
+        }
+        if (i >= steps.size) onComplete() else index = i
     }
 
     LaunchedEffect(steps) {
         moveToFirstValid()
     }
 
-    val rect = steps.getOrNull(index)?.targetRect()
-    if (rect != null) lastSeenValidIndex = index
+    val step = steps.getOrNull(index) ?: return
+    val rect = step.targetRect()
 
     // Full-screen overlay
     Box(
@@ -93,6 +118,15 @@ fun CoachMarkOverlay(
                 indication = null,
                 interactionSource = remember { MutableInteractionSource() }
             ) { /* consume */ }
+            .pointerInput(index, rect) {
+                detectTapGestures { pos: Offset ->
+                    val r = rect ?: return@detectTapGestures
+                    if (step.allowTargetTapToAdvance && r.contains(pos)) {
+                        step.onTargetTap?.invoke()
+                        moveNext()
+                    }
+                }
+            }
     ) {
         // Scrim + cutout
         Canvas(
@@ -103,14 +137,13 @@ fun CoachMarkOverlay(
         ) {
             drawRect(Color.Black.copy(alpha = 0.72f))
 
-            val r = rect
-            if (r != null) {
+            if (rect != null) {
                 val pad = 6.dp.toPx()
                 val cut = Rect(
-                    left = (r.left - pad).coerceAtLeast(0f),
-                    top = (r.top - pad).coerceAtLeast(0f),
-                    right = (r.right + pad).coerceAtMost(size.width),
-                    bottom = (r.bottom + pad).coerceAtMost(size.height)
+                    left = (rect.left - pad).coerceAtLeast(0f),
+                    top = (rect.top - pad).coerceAtLeast(0f),
+                    right = (rect.right + pad).coerceAtMost(size.width),
+                    bottom = (rect.bottom + pad).coerceAtMost(size.height)
                 )
                 val corner = CornerRadius(18.dp.toPx(), 18.dp.toPx())
                 drawRoundRect(
@@ -130,30 +163,47 @@ fun CoachMarkOverlay(
             }
         }
 
-        val safeIndex = lastSeenValidIndex ?: index
-        val isLast = safeIndex >= steps.lastIndex
-        val step = steps[safeIndex]
+        val isLast = index >= steps.lastIndex
 
         val cardModifier = when (step.cardPosition) {
             CoachCardPosition.TOP -> Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
                 .padding(16.dp)
+            CoachCardPosition.TOP_START -> Modifier
+                .align(Alignment.TopStart)
+                .statusBarsPadding()
+                .padding(12.dp)
             CoachCardPosition.BOTTOM -> Modifier
                 .align(Alignment.BottomCenter)
                 // Keep the tutorial controls above the Android navigation bar.
                 .navigationBarsPadding()
                 .padding(16.dp)
-        }
+        }.offset(y = step.cardOffsetY)
+
+        val typedBody = rememberTypewriterText(fullText = step.body, enabled = step.typewriterBody, key = index)
 
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             modifier = cardModifier
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text(step.title, fontWeight = FontWeight.SemiBold)
+                if (step.showRobotHead) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Image(
+                            painter = painterResource(id = com.matchpoint.myaidietapp.R.drawable.robot_head),
+                            contentDescription = null,
+                            modifier = Modifier.size(44.dp),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(step.title, fontWeight = FontWeight.SemiBold)
+                    }
+                } else {
+                    Text(step.title, fontWeight = FontWeight.SemiBold)
+                }
                 Text(
-                    step.body,
+                    typedBody,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 6.dp)
@@ -165,20 +215,57 @@ fun CoachMarkOverlay(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "${safeIndex + 1}/${steps.size}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    // Keep the UI clean for the new guided tour; step counter isn't shown.
+                    Spacer(modifier = Modifier.width(1.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = onDone) { Text("Skip") }
-                        Button(onClick = { if (isLast) onDone() else moveNext() }) {
-                            Text(if (isLast) "Done" else "Next")
+                        TextButton(onClick = onSkip) { Text("Skip") }
+                        if (!step.hideNextButton) {
+                            val nextEnabled = !step.allowTargetTapToAdvance
+                            Button(
+                                enabled = nextEnabled,
+                                onClick = { if (isLast) onComplete() else moveNext() }
+                            ) {
+                                Text(
+                                    step.primaryButtonText
+                                        ?: if (isLast) "Done" else "Next"
+                                )
+                            }
                         }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun rememberTypewriterText(
+    fullText: String,
+    enabled: Boolean,
+    key: Any
+): String {
+    var shown by rememberSaveable(key) { mutableStateOf(if (enabled) "" else fullText) }
+
+    LaunchedEffect(fullText, enabled, key) {
+        if (!enabled) {
+            shown = fullText
+            return@LaunchedEffect
+        }
+        shown = ""
+        val clean = fullText
+        // Simple, cheap typewriter: reveal one character at a time.
+        for (i in clean.indices) {
+            shown = clean.substring(0, i + 1)
+            // If we just typed an ellipsis "...", pause for readability.
+            if (i >= 2 && clean[i - 2] == '.' && clean[i - 1] == '.' && clean[i] == '.') {
+                delay(1500L)
+            } else if (clean[i] == '…') {
+                delay(1500L)
+            } else {
+                delay(14L)
+            }
+        }
+    }
+    return shown
 }
 

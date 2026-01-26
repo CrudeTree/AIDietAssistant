@@ -306,9 +306,10 @@ functions.http('checkin', async (req, res) => {
     const tier = verifiedTier;
 
     function dailyChatLimitForTier(t) {
-      if (t === 'PRO') return 150;
+      // Premium is marketed as "unlimited", but enforce a fair-use cap server-side.
+      if (t === 'PRO') return 200;
       if (t === 'REGULAR') return 50;
-      return 10; // FREE
+      return 25; // FREE
     }
 
     // Separate budget for "expensive" analysis calls (vision + food analysis).
@@ -1397,6 +1398,16 @@ Notes / swaps (only using my list): <short>
       `Tone hints: ${tone || "short, casual, varied, human, not templated"}.`
     ];
 
+    // If the user message is NOT about food/diet/the app, route to a "normal assistant" prompt
+    // (no diet-app rules, no app-action behaviors).
+    const isFoodRelated = (() => {
+      const s = String(safeUserMessage || '').toLowerCase().trim();
+      if (!s) return false;
+      const re =
+        /\b(food|foods|meal|meals|recipe|recipes|cook|cooking|ingredient|ingredients|snack|snacks|breakfast|lunch|dinner|calorie|calories|protein|carb|carbs|fat|macros|macro|fast|fasting|eat|eating|hungry|hunger|diet|keto|vegan|carnivore|grocery|groceries|menu|menus|restaurant|nutrition|healthy|weight|fasted)\b/;
+      return re.test(s);
+    })();
+
     const behavior = `
 You are a helpful, conversational assistant inside a diet-management app.
 
@@ -1407,6 +1418,7 @@ Core scope:
 
 Conversation:
 - If the message isn’t about food/diet/this app, just answer normally (don’t force diet talk).
+- If you answer a non-food question, do NOT append a “food-related questions…” redirect. Just answer the question.
 - Keep continuity; interpret “it/that/this” as the most recent food/topic unless unclear.
 
 Daily calories:
@@ -1436,15 +1448,27 @@ App actions:
 - JSON must be valid. No extra text inside the tag.
 `.trim();
 
-    const prompt = [
-      contextLines.join(" "),
-      "",
-      chatContext ? `Recent conversation (most recent last):\n${truncateText(chatContext, 2000)}` : "Recent conversation: (none)",
-      "",
-      `User message: ${safeUserMessage || "none"}.`,
-      "",
-      behavior
-    ].join("\n");
+    const prompt = isFoodRelated
+      ? [
+          contextLines.join(" "),
+          "",
+          chatContext ? `Recent conversation (most recent last):\n${truncateText(chatContext, 2000)}` : "Recent conversation: (none)",
+          "",
+          `User message: ${safeUserMessage || "none"}.`,
+          "",
+          behavior
+        ].join("\n")
+      : [
+          // Keep this prompt minimal so the assistant behaves like "normal ChatGPT".
+          "Answer the user's question directly and normally.",
+          "Do not steer the conversation back to diet/food unless the user asks.",
+          // App safety: avoid accidental action tags on non-food answers.
+          "Do NOT output <APP_ACTION> or <APP_KIND> tags in this response.",
+          "",
+          chatContext ? `Recent conversation (most recent last):\n${truncateText(chatContext, 1200)}` : "Recent conversation: (none)",
+          "",
+          `User message: ${safeUserMessage || "none"}.`
+        ].join("\n");
 
     const chatResp = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -1457,8 +1481,9 @@ App actions:
         messages: [
           {
             role: 'system',
-            content:
-              'You are a helpful, conversational assistant. When the user talks about food/hunger/diet/cooking/fasting window or this app, also follow any extra food-coach behavior described in the user message. Otherwise, just answer normally.'
+            content: isFoodRelated
+              ? 'You are a helpful, conversational assistant. When the user talks about food/hunger/diet/cooking/fasting window or this app, also follow any extra food-coach behavior described in the user message. Otherwise, just answer normally.'
+              : 'You are a helpful, conversational assistant. Answer normally.'
           },
           { role: 'user', content: prompt }
         ],

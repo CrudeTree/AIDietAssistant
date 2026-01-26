@@ -54,6 +54,7 @@ fun ChoosePlanScreen(
     currentCycle: BillingCycle?,
     notice: String?,
     onClose: () -> Unit,
+    onOpenTerms: () -> Unit,
     onPickPlan: (SubscriptionTier, BillingCycle) -> Unit,
     onManageSubscription: () -> Unit
 ) {
@@ -148,7 +149,7 @@ fun ChoosePlanScreen(
             PlanCard(
                 title = "Free",
                 subtitle = "Good for trying it out",
-                bullets = listOf("10 chats/day", "20 food items"),
+                bullets = listOf("25 chats/day", "10 food items", "3 saved recipes"),
                 selected = selectedTier == SubscriptionTier.FREE,
                 enabled = true,
                 isCurrent = currentTier == SubscriptionTier.FREE,
@@ -156,9 +157,9 @@ fun ChoosePlanScreen(
                 onClick = { selectedTier = SubscriptionTier.FREE }
             )
             PlanCard(
-                title = "Basic — $basicPrice",
+                title = "Basic: $basicPrice",
                 subtitle = "Great for consistent progress",
-                bullets = listOf("50 chats/day", "100 food items"),
+                bullets = listOf("50 chats/day", "50 food items", "15 saved recipes"),
                 selected = selectedTier == SubscriptionTier.REGULAR,
                 enabled = true,
                 isCurrent = currentTier == SubscriptionTier.REGULAR &&
@@ -168,9 +169,9 @@ fun ChoosePlanScreen(
                 onClick = { selectedTier = SubscriptionTier.REGULAR }
             )
             PlanCard(
-                title = "Premium — $premiumPrice",
+                title = "Premium: $premiumPrice",
                 subtitle = "For power users",
-                bullets = listOf("150 chats/day", "500 food items"),
+                bullets = listOf("Unlimited chats", "Unlimited food items", "Unlimited saved recipes"),
                 selected = selectedTier == SubscriptionTier.PRO,
                 enabled = true,
                 isCurrent = currentTier == SubscriptionTier.PRO &&
@@ -179,6 +180,19 @@ fun ChoosePlanScreen(
                 badgeResId = R.drawable.ic_premium_badge,
                 onClick = { selectedTier = SubscriptionTier.PRO }
             )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Limits apply. See Terms.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TextButton(onClick = onOpenTerms) { Text("Terms & Limits") }
+            }
 
             HorizontalDivider()
 

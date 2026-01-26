@@ -7,11 +7,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -67,11 +71,14 @@ fun PopularIngredientsPickerDialog(
             Surface(
                 shape = RoundedCornerShape(18.dp),
                 tonalElevation = 10.dp,
-                modifier = Modifier.fillMaxWidth()
+                // Constrain dialog height so bottom CTA remains reachable on small screens.
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.92f)
             ) {
                 Column(
                     modifier = Modifier
-                        .fillMaxWidth()
+                        .fillMaxSize()
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
@@ -131,8 +138,14 @@ fun PopularIngredientsPickerDialog(
                         modifier = Modifier.fillMaxWidth()
                     )
 
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        popular.forEach { name ->
+                    // Only the list scrolls, so the Generate button stays reachable.
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = true)
+                    ) {
+                        items(popular, key = { it.lowercase() }) { name ->
                             val isOn = picked.contains(name)
                             val bg = if (isOn) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Transparent
                             val iconId = resolveIcon(name)
@@ -149,7 +162,7 @@ fun PopularIngredientsPickerDialog(
                                     .clickable(enabled = enabled) {
                                         picked = if (isOn) picked - name else picked + name
                                     }
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    .padding(horizontal = 12.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {

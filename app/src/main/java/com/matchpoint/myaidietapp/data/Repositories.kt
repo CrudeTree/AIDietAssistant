@@ -141,6 +141,23 @@ class UserRepository(
     suspend fun updateAutoPilotEnabled(enabled: Boolean) {
         userDoc.update("autoPilotEnabled", enabled).await()
     }
+
+    suspend fun updateTutorialProgress(
+        progressSteps: Int,
+        totalSteps: Int,
+        progressText: String,
+        updatedAt: Timestamp = Timestamp.now()
+    ) {
+        userDoc.set(
+            mapOf(
+                "tutorialProgressSteps" to progressSteps,
+                "tutorialTotalSteps" to totalSteps,
+                "tutorialProgressText" to progressText,
+                "tutorialProgressUpdatedAt" to updatedAt
+            ),
+            SetOptions.merge()
+        ).await()
+    }
 }
 
 data class CalorieEntry(

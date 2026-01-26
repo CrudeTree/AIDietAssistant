@@ -38,6 +38,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.ui.draw.rotate
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -140,6 +142,7 @@ private enum class Screen {
     HOME,
     PROFILE,
     SETTINGS,
+    TERMS,
     FOOD_LIST,
     RECIPES,
     ADD_ENTRY,
@@ -268,13 +271,32 @@ fun DigitalStomachApp() {
     var foodListFilter by remember { mutableStateOf<String?>(null) }
     var lockedPhotoCategories by remember { mutableStateOf<Set<String>?>(null) }
     var pendingPlanNotice by remember { mutableStateOf<String?>(null) }
+    val tutorialManager = remember(context) { HomeTutorialManager(context.applicationContext) }
+
+    // Global skip confirmation dialog (used by all tutorial "Skip" buttons).
+    tutorialManager.pendingSkipConfirmAction()?.let { onConfirmExit ->
+        AlertDialog(
+            onDismissRequest = { tutorialManager.clearSkipConfirm() },
+            title = { Text("Exit tutorial?") },
+            text = { Text("Are you sure you want to exit the tutorial?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        tutorialManager.clearSkipConfirm()
+                        onConfirmExit()
+                    }
+                ) { Text("Yes") }
+            },
+            dismissButton = {
+                TextButton(onClick = { tutorialManager.clearSkipConfirm() }) { Text("Cancel") }
+            }
+        )
+    }
     var pendingPurchase by remember { mutableStateOf<PurchaseRequest?>(null) }
     var purchaseInFlight by remember { mutableStateOf(false) }
     var openRecipeId by remember { mutableStateOf<String?>(null) }
     var openDailyPlanMealId by remember { mutableStateOf<String?>(null) }
     // Photo-based food capture no longer uses a quantity (always 1).
-    // One-shot flag: open the popular ingredient picker the next time Home renders.
-    var pendingOpenPopularPicker by rememberSaveable { mutableStateOf(false) }
 
     fun navigate(to: Screen) {
         if (to == screen) return
@@ -333,8 +355,6 @@ fun DigitalStomachApp() {
                     scope.launch {
                         try {
                             authRepo.signIn(email, password)
-                            // Show the beginner picker on first entry after auth (it will self-gate to once).
-                            pendingOpenPopularPicker = true
                             // Analytics: track successful sign-in
                             Firebase.analytics.logEvent(FirebaseAnalytics.Event.LOGIN, null)
                         } catch (e: Exception) {
@@ -350,7 +370,8 @@ fun DigitalStomachApp() {
                     scope.launch {
                         try {
                             authRepo.createAccount(email, password)
-                            pendingOpenPopularPicker = true
+                            // On first account creation, show the guided tutorial on Home.
+                            tutorialManager.requestReplay()
                             // Make the post-auth landing deterministic (Home).
                             backStack.clear()
                             screen = Screen.HOME
@@ -370,6 +391,17 @@ fun DigitalStomachApp() {
         // Safe: vm exists if authUid != null
         val realVm = vm!!
         val state by realVm.uiState.collectAsState()
+
+        // Tutorial analytics: record farthest tutorial step reached in Firestore.
+        // We sync while the tutorial is active, and also keep syncing as max increases.
+        val tutActive = tutorialManager.shouldShow()
+        val tutMax = tutorialManager.maxStepReached()
+        LaunchedEffect(authUid, tutActive, tutMax) {
+            if (authUid != null && (tutActive || tutMax > 0)) {
+                // Clamp to 32 steps for analytics display (e.g. "4/32", "32/32").
+                realVm.updateTutorialProgress(tutMax, totalSteps = 32)
+            }
+        }
 
         // RevenueCat is used for UI display, but server enforces quotas and writes tier back to Firestore.
         val rc = remember { RevenueCatRepository() }
@@ -466,9 +498,9 @@ fun DigitalStomachApp() {
         }
 
         fun foodLimitFor(tier: com.matchpoint.myaidietapp.model.SubscriptionTier): Int = when (tier) {
-            com.matchpoint.myaidietapp.model.SubscriptionTier.FREE -> 20
-            com.matchpoint.myaidietapp.model.SubscriptionTier.REGULAR -> 100
-            com.matchpoint.myaidietapp.model.SubscriptionTier.PRO -> 500
+            com.matchpoint.myaidietapp.model.SubscriptionTier.FREE -> 10
+            com.matchpoint.myaidietapp.model.SubscriptionTier.REGULAR -> 50
+            com.matchpoint.myaidietapp.model.SubscriptionTier.PRO -> 1000
         }
 
         // If a quota/limit is hit, send user to Choose Plan screen with a notice banner.
@@ -500,6 +532,7 @@ fun DigitalStomachApp() {
             )
             screen == Screen.ADD_FOOD_CATEGORY && state.profile != null -> AddFoodCategoryScreen(
                 enabled = !state.isProcessing,
+                tutorialManager = tutorialManager,
                 onPickMeals = {
                     foodListFilter = "MEAL"
                     navigate(Screen.FOOD_LIST)
@@ -536,8 +569,17 @@ fun DigitalStomachApp() {
                 isProcessing = state.isProcessing,
                 remainingSlots = (foodLimitFor(state.profile!!.subscriptionTier) - state.profile!!.foodItems.size).coerceAtLeast(0),
                 limit = foodLimitFor(state.profile!!.subscriptionTier),
+                tutorialManager = tutorialManager,
                 onSubmit = { names, categories ->
                     vm.addFoodItemsBatch(names, categories)
+                    // Advance tutorial after the user submits Ingredients by text.
+                    if (tutorialManager.shouldShow() &&
+                        tutorialManager.step() == 6 &&
+                        textEntryMode == TextEntryMode.INGREDIENT
+                    ) {
+                        // After submit, we return Home and continue the tutorial there.
+                        tutorialManager.setStep(7)
+                    }
                     goHomeClear()
                 },
                 onBack = { popOrHome() }
@@ -586,6 +628,7 @@ fun DigitalStomachApp() {
                 totalLimit = foodLimitFor(state.profile!!.subscriptionTier),
                 showFoodIcons = state.profile!!.showFoodIcons,
                 fontSizeSp = state.profile!!.uiFontSizeSp,
+                tutorialManager = tutorialManager,
                 onRemoveFood = { vm.removeFoodItem(it) },
                 onUpdateCategories = { id, cats -> vm.updateFoodItemCategories(id, cats) },
                 onAddText = { category ->
@@ -631,10 +674,12 @@ fun DigitalStomachApp() {
                     navigate(Screen.RECIPE_DETAIL)
                 },
                 onOpenSettings = { navigate(Screen.SETTINGS) },
-                wallpaperSeed = wallpaperSeed
+                wallpaperSeed = wallpaperSeed,
+                tutorialManager = tutorialManager
             )
             screen == Screen.SETTINGS && state.profile != null -> SettingsScreen(
                 profile = state.profile!!,
+                tutorialManager = tutorialManager,
                 isProcessing = state.isProcessing,
                 errorText = state.error,
                 onBack = { popOrHome() },
@@ -650,6 +695,9 @@ fun DigitalStomachApp() {
                 onUpdateEatingWindowStart = { vm.updateEatingWindowStart(it) },
                 onDeleteAccount = { password -> vm.deleteAccount(password) },
                 wallpaperSeed = wallpaperSeed
+            )
+            screen == Screen.TERMS -> TermsScreen(
+                onBack = { popOrHome() }
             )
             screen == Screen.RECIPES -> RecipesScreen(
                 recipes = state.savedRecipes,
@@ -711,6 +759,7 @@ fun DigitalStomachApp() {
                 currentCycle = currentCycleForPlanUi,
                 notice = pendingPlanNotice,
                 onClose = { popOrHome() },
+                onOpenTerms = { navigate(Screen.TERMS) },
                 onPickPlan = { tier, cycle ->
                     pendingPlanNotice = null
                     pendingPurchase = PurchaseRequest(tier = tier, cycle = cycle)
@@ -744,13 +793,10 @@ fun DigitalStomachApp() {
             )
             else -> HomeScreen(
                 state = state,
+                tutorialManager = tutorialManager,
                 onAddFood = { name, qty, productUrl, labelUrl ->
                     vm.addFoodItemSimple(name, setOf("SNACK"), qty, productUrl, labelUrl, null)
                 },
-                onAddIngredients = { names ->
-                    vm.addFoodItemsBatch(names = names, categories = setOf("INGREDIENT"))
-                },
-                onMarkBeginnerIngredientsPickerSeen = { vm.markBeginnerIngredientsPickerSeen() },
                 onRemoveFood = { vm.removeFoodItem(it) },
                 onIntroDone = { vm.markIntroDone() },
                 onConfirmMeal = { vm.confirmMealConsumed() },
@@ -774,9 +820,7 @@ fun DigitalStomachApp() {
                 onNewChat = { vm.newChat() },
                 onSelectChat = { chatId -> vm.selectChat(chatId) },
                 onDeleteChat = { chatId -> vm.deleteChat(chatId) },
-                wallpaperSeed = wallpaperSeed,
-                autoOpenPopularIngredientsPicker = pendingOpenPopularPicker,
-                onAutoOpenPopularIngredientsPickerConsumed = { pendingOpenPopularPicker = false }
+                wallpaperSeed = wallpaperSeed
             )
         }
             }
@@ -1087,9 +1131,8 @@ fun OnboardingScreen(
 @Composable
 fun HomeScreen(
     state: UiState,
+    tutorialManager: HomeTutorialManager,
     onAddFood: (String, Int, String?, String?) -> Unit,
-    onAddIngredients: (List<String>) -> Unit,
-    onMarkBeginnerIngredientsPickerSeen: () -> Unit,
     onRemoveFood: (String) -> Unit,
     onIntroDone: () -> Unit,
     onConfirmMeal: () -> Unit,
@@ -1110,15 +1153,12 @@ fun HomeScreen(
     onNewChat: () -> Unit,
     onSelectChat: (chatId: String) -> Unit,
     onDeleteChat: (chatId: String) -> Unit,
-    wallpaperSeed: Int,
-    autoOpenPopularIngredientsPicker: Boolean = false,
-    onAutoOpenPopularIngredientsPickerConsumed: () -> Unit = {}
+    wallpaperSeed: Int
 ) {
     var chatInput by remember { mutableStateOf("") }
     var chatFullscreen by rememberSaveable { mutableStateOf(false) }
     var historyOpen by rememberSaveable { mutableStateOf(false) }
     var pendingDeleteChatId by rememberSaveable { mutableStateOf<String?>(null) }
-    var showBeginnerIngredientsPicker by rememberSaveable { mutableStateOf(false) }
     var showExistingIngredientsPicker by rememberSaveable { mutableStateOf(false) }
     var showDailyPlanPopup by rememberSaveable { mutableStateOf(false) }
     var showDailyPlanOverlay by rememberSaveable { mutableStateOf(false) }
@@ -1126,7 +1166,6 @@ fun HomeScreen(
     var showReviewPrompt by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val reviewPromptManager = remember(context) { ReviewPromptManager(context.applicationContext) }
-    val homeTutorialManager = remember(context) { HomeTutorialManager(context.applicationContext) }
     var showHomeTutorial by rememberSaveable { mutableStateOf(false) }
     val nowMillis = System.currentTimeMillis()
     val mealDue = state.profile?.nextMealAtMillis?.let { nowMillis >= it } == true
@@ -1177,21 +1216,12 @@ fun HomeScreen(
         }
     }
 
-    // One-time Home tutorial (doesn't show in fullscreen chat).
-    LaunchedEffect(chatFullscreen) {
-        if (!chatFullscreen && homeTutorialManager.shouldShow()) {
+    // Guided tutorial (doesn't show in fullscreen chat).
+    val tutorialShouldShow = tutorialManager.shouldShow()
+    LaunchedEffect(chatFullscreen, tutorialShouldShow) {
+        if (!chatFullscreen && tutorialShouldShow) {
             showHomeTutorial = true
         }
-    }
-
-    // Beginner-only: show the popular ingredients picker once, on first entry.
-    LaunchedEffect(autoOpenPopularIngredientsPicker, chatFullscreen, state.profile?.hasSeenBeginnerIngredientsPicker) {
-        if (chatFullscreen || !autoOpenPopularIngredientsPicker) return@LaunchedEffect
-        val alreadySeen = state.profile?.hasSeenBeginnerIngredientsPicker == true
-        if (!alreadySeen) {
-            showBeginnerIngredientsPicker = true
-        }
-        onAutoOpenPopularIngredientsPickerConsumed()
     }
 
     // When chat is fullscreen, Android back should minimize back to normal Home.
@@ -1422,17 +1452,23 @@ fun HomeScreen(
                             .size(96.dp)
                             .zIndex(2f)
                     ) {
-                        Image(
+                    Image(
                             painter = painterResource(id = R.drawable.ic_food_carrot2),
                             contentDescription = "Open daily plan",
                             modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Fit
-                        )
-                    }
+                        contentScale = ContentScale.Fit
+                    )
                 }
-                TextButton(
-                    onClick = { showDailyPlanPopup = true },
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
+            }
+            TextButton(
+                onClick = {
+                        // Tutorial step 22: tapping Daily Plan advances the tutorial and opens the popup.
+                        if (tutorialManager.shouldShow() && tutorialManager.step() == 22) {
+                            tutorialManager.setStep(23)
+                        }
+                        showDailyPlanPopup = true
+                    },
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
                     contentPadding = PaddingValues(horizontal = 22.dp, vertical = 4.dp),
                     modifier = Modifier
                         .align(Alignment.Center)
@@ -1447,12 +1483,12 @@ fun HomeScreen(
                         Spacer(modifier = Modifier.width(iconSize + iconGap))
                         Text("Daily Plan", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
                         Spacer(modifier = Modifier.width(iconGap))
-                        Image(
+                    Image(
                             painter = painterResource(id = R.drawable.daily_plan),
-                            contentDescription = null,
-                            modifier = Modifier.size(iconSize),
-                            contentScale = ContentScale.Fit
-                        )
+                        contentDescription = null,
+                        modifier = Modifier.size(iconSize),
+                        contentScale = ContentScale.Fit
+                    )
                     }
                 }
             }
@@ -1837,7 +1873,7 @@ fun HomeScreen(
             p.eatingWindowEndMinutes != null
         if (showWindowBar) {
             Box(modifier = Modifier.onGloballyPositioned { coords -> rectFasting = coords.boundsInRoot() }) {
-                EatingWindowBar(profile = p)
+            EatingWindowBar(profile = p)
             }
             Spacer(modifier = Modifier.height(8.dp))
         }
@@ -1861,6 +1897,22 @@ fun HomeScreen(
                 }
             )
         )
+
+        // App version (bottom-right under the chat box)
+        if (!chatFullscreen) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp, end = 6.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Text(
+                    text = "v${com.matchpoint.myaidietapp.BuildConfig.VERSION_NAME}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.38f)
+                )
+            }
+        }
         }
 
         // Vine overlay: full-width, above everything, positioned to sit right on top of the chat box.
@@ -1888,8 +1940,8 @@ fun HomeScreen(
                         style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke)
                     )
                 }
+                }
             }
-        }
 
         if (showVine && !chatFullscreen && chatTopPx > 0) {
             // ~10% wider than before
@@ -1922,114 +1974,366 @@ fun HomeScreen(
         }
     }
 
-    // One-time Home tutorial overlay (dim + highlight + Next).
+    // Guided first-run tutorial overlay (robot + typed text + highlight).
     // Only show when nothing else modal is open, to avoid stacking/confusion.
+    val tutorialStep = tutorialManager.step()
     if (showHomeTutorial &&
         !chatFullscreen &&
         !showReviewPrompt &&
-        !showBeginnerIngredientsPicker &&
+        !showScanPicker &&
         !showExistingIngredientsPicker &&
         !showDailyPlanPopup &&
         !showDailyPlanOverlay
     ) {
-        // Union rect for the "entire chat area" (history + input).
-        val chatWholeRect = run {
-            val a = rectChatHistory
-            val b = rectChatInput
-            if (a == null || b == null) null
-            else Rect(
-                left = minOf(a.left, b.left),
-                top = minOf(a.top, b.top),
-                right = maxOf(a.right, b.right),
-                bottom = maxOf(a.bottom, b.bottom)
+        when (tutorialStep) {
+            0 -> CoachMarkOverlay(
+                steps = listOf(
+                    CoachStep(
+                        title = "AI Diet Assistant",
+                        body = "Hey there! Welcome to the AI Diet Assistant app!",
+                        targetRect = { null },
+                        cardPosition = CoachCardPosition.TOP_START,
+                        showRobotHead = true,
+                        typewriterBody = true,
+                        allowNullTarget = true,
+                        primaryButtonText = "Next"
+                    )
+                ),
+                onSkip = {
+                    tutorialManager.requestSkipConfirm {
+                        showHomeTutorial = false
+                        tutorialManager.markDone()
+                    }
+                },
+                onComplete = {
+                    tutorialManager.setStep(1)
+                },
+                modifier = Modifier.zIndex(10000f)
+            )
+            1 -> CoachMarkOverlay(
+                steps = listOf(
+                    CoachStep(
+                        title = "AI Diet Assistant",
+                        body = "Let me show you around the app a bit. Feel free to skip at any time. If you do skip me, you can show me again by going into Settings and tapping Show Tutorial. Are you ready to begin?",
+                        targetRect = { null },
+                        cardPosition = CoachCardPosition.TOP_START,
+                        showRobotHead = true,
+                        typewriterBody = true,
+                        allowNullTarget = true,
+                        primaryButtonText = "Next"
+                    )
+                ),
+                onSkip = {
+                    tutorialManager.requestSkipConfirm {
+                        showHomeTutorial = false
+                        tutorialManager.markDone()
+                    }
+                },
+                onComplete = {
+                    tutorialManager.setStep(2)
+                },
+                modifier = Modifier.zIndex(10000f)
+            )
+            2 -> CoachMarkOverlay(
+                steps = listOf(
+                    CoachStep(
+                        title = "AI Diet Assistant",
+                        body = "Let’s start by adding an ingredient. Click the Add To List button.",
+                        targetRect = { rectAdd },
+                        cardPosition = CoachCardPosition.TOP_START,
+                        // Move the bubble down so it doesn't cover the highlighted button.
+                        cardOffsetY = 120.dp,
+                        showRobotHead = true,
+                        typewriterBody = true,
+                        allowTargetTapToAdvance = true,
+                        hideNextButton = true, // No "Done" button here; tap the highlight.
+                        onTargetTap = {
+                            tutorialManager.setStep(3)
+                            showHomeTutorial = false
+                            onOpenAddEntry()
+                        }
+                    )
+                ),
+                onSkip = {
+                    tutorialManager.requestSkipConfirm {
+                        showHomeTutorial = false
+                        tutorialManager.markDone()
+                    }
+                },
+                onComplete = {
+                    // Tap-to-advance step handles navigation itself.
+                    showHomeTutorial = false
+                },
+                modifier = Modifier.zIndex(10000f)
+            )
+            7 -> run {
+                val chatWholeRect = run {
+                    val a = rectChatHistory
+                    val b = rectChatInput
+                    if (a == null || b == null) null
+                    else Rect(
+                        left = minOf(a.left, b.left),
+                        top = minOf(a.top, b.top),
+                        right = maxOf(a.right, b.right),
+                        bottom = maxOf(a.bottom, b.bottom)
+                    )
+                }
+                CoachMarkOverlay(
+                    steps = listOf(
+                        CoachStep(
+                            title = "AI Diet Assistant",
+                            body = "Great job! Here in the chat, I’ll analyze your ingredients.",
+                            targetRect = { chatWholeRect },
+                            cardPosition = CoachCardPosition.TOP_START,
+                            showRobotHead = true,
+                            typewriterBody = true,
+                            allowNullTarget = true,
+                            primaryButtonText = "Next"
+                        )
+                    ),
+                    onSkip = {
+                        tutorialManager.requestSkipConfirm {
+                            showHomeTutorial = false
+                            tutorialManager.markDone()
+                        }
+                    },
+                    onComplete = { tutorialManager.setStep(8) },
+                    modifier = Modifier.zIndex(10000f)
+                )
+            }
+            8 -> run {
+                val ingredientCount = state.profile?.foodItems
+                    ?.count { it.categories.any { c -> c.equals("INGREDIENT", ignoreCase = true) } } ?: 0
+                val msg = if (ingredientCount > 0) {
+                    "Woo! I see your ingredients now! And might I say, those are some fine ingredients you have there."
+                } else {
+                    "Hmm, I’m not seeing your ingredients quite yet. Give it a second, then we’ll keep going."
+                }
+                CoachMarkOverlay(
+                    steps = listOf(
+                        CoachStep(
+                            title = "AI Diet Assistant",
+                            body = msg,
+                            targetRect = { null },
+                            cardPosition = CoachCardPosition.TOP_START,
+                            showRobotHead = true,
+                            typewriterBody = true,
+                            allowNullTarget = true,
+                            primaryButtonText = "Next"
+                        )
+                    ),
+                    onSkip = {
+                        tutorialManager.requestSkipConfirm {
+                            showHomeTutorial = false
+                            tutorialManager.markDone()
+                        }
+                    },
+                    onComplete = { tutorialManager.setStep(9) },
+                    modifier = Modifier.zIndex(10000f)
+                )
+            }
+            9 -> CoachMarkOverlay(
+                steps = listOf(
+                    CoachStep(
+                        title = "AI Diet Assistant",
+                        body = "Let’s take a look at the AI Evaluate Food button here.",
+                        targetRect = { rectScan },
+                        cardPosition = CoachCardPosition.BOTTOM,
+                        showRobotHead = true,
+                        typewriterBody = true,
+                        primaryButtonText = "Next"
+                    )
+                ),
+                onSkip = {
+                    tutorialManager.requestSkipConfirm {
+                        showHomeTutorial = false
+                        tutorialManager.markDone()
+                    }
+                },
+                onComplete = { tutorialManager.setStep(10) },
+                modifier = Modifier.zIndex(10000f)
+            )
+            10 -> CoachMarkOverlay(
+                steps = listOf(
+                    CoachStep(
+                        title = "AI Diet Assistant",
+                        body = "This is where we can use your phone’s camera to send me images to analyze.",
+                        targetRect = { rectScan },
+                        cardPosition = CoachCardPosition.BOTTOM,
+                        showRobotHead = true,
+                        typewriterBody = true,
+                        primaryButtonText = "Next"
+                    )
+                ),
+                onSkip = {
+                    tutorialManager.requestSkipConfirm {
+                        showHomeTutorial = false
+                        tutorialManager.markDone()
+                    }
+                },
+                onComplete = { tutorialManager.setStep(11) },
+                modifier = Modifier.zIndex(10000f)
+            )
+            11 -> CoachMarkOverlay(
+                steps = listOf(
+                    CoachStep(
+                        title = "AI Diet Assistant",
+                        body = "Let’s go ahead and click it now.",
+                        targetRect = { rectScan },
+                        cardPosition = CoachCardPosition.BOTTOM,
+                        showRobotHead = true,
+                        typewriterBody = true,
+                        allowTargetTapToAdvance = true,
+                        hideNextButton = true,
+                        onTargetTap = {
+                            tutorialManager.setStep(12)
+                            showScanPicker = true
+                        }
+                    )
+                ),
+                onSkip = {
+                    tutorialManager.requestSkipConfirm {
+                        showHomeTutorial = false
+                        tutorialManager.markDone()
+                    }
+                },
+                onComplete = { /* tap-to-advance */ },
+                modifier = Modifier.zIndex(10000f)
+            )
+            15 -> CoachMarkOverlay(
+                steps = listOf(
+                    CoachStep(
+                        title = "AI Diet Assistant",
+                        body = "Excellent. We’re making great progress! Let’s click Generate Meal.",
+                        targetRect = { rectGen },
+                        // Put the dialog at the very bottom so it never covers the Generate Meal button.
+                        cardPosition = CoachCardPosition.BOTTOM,
+                        showRobotHead = true,
+                        typewriterBody = true,
+                        allowTargetTapToAdvance = true,
+                        hideNextButton = true,
+                        onTargetTap = {
+                            tutorialManager.setStep(16)
+                            showExistingIngredientsPicker = true
+                        }
+                    )
+                ),
+                onSkip = {
+                    tutorialManager.requestSkipConfirm {
+                        showHomeTutorial = false
+                        tutorialManager.markDone()
+                    }
+                },
+                onComplete = { /* tap-to-advance */ },
+                modifier = Modifier.zIndex(10000f)
+            )
+            20 -> CoachMarkOverlay(
+                steps = listOf(
+                    CoachStep(
+                        title = "AI Diet Assistant",
+                        body = "Hmm… I see… what could we make with this… Oh! I know!",
+                        targetRect = { null },
+                        cardPosition = CoachCardPosition.TOP_START,
+                        showRobotHead = true,
+                        typewriterBody = true,
+                        allowNullTarget = true,
+                        primaryButtonText = "Next"
+                    )
+                ),
+                onSkip = {
+                    showHomeTutorial = false
+                    tutorialManager.markDone()
+                },
+                onComplete = { tutorialManager.setStep(21) },
+                modifier = Modifier.zIndex(10000f)
+            )
+            21 -> CoachMarkOverlay(
+                steps = listOf(
+                    CoachStep(
+                        title = "AI Diet Assistant",
+                        body = "If everything went well, you should now see the recipe I created for you. If you like it, tap Save and I’ll save it in your recipes list (found on the Profile page).\n\nWhen you’re ready, tap Daily Plan.",
+                        targetRect = { null },
+                        cardPosition = CoachCardPosition.TOP_START,
+                        showRobotHead = true,
+                        typewriterBody = true,
+                        allowNullTarget = true,
+                        primaryButtonText = "Next"
+                    )
+                ),
+                onSkip = {
+                    showHomeTutorial = false
+                    tutorialManager.markDone()
+                },
+                onComplete = { tutorialManager.setStep(22) },
+                modifier = Modifier.zIndex(10000f)
+            )
+            22 -> run {
+                // Step 22: no dialog; highlight Chat + Daily Plan, allow interaction in chat (scroll, save).
+                val chatWholeRect = run {
+                    val a = rectChatHistory
+                    val b = rectChatInput
+                    if (a == null || b == null) null
+                    else Rect(
+                        left = minOf(a.left, b.left),
+                        top = minOf(a.top, b.top),
+                        right = maxOf(a.right, b.right),
+                        bottom = maxOf(a.bottom, b.bottom)
+                    )
+                }
+                val highlightRects = listOfNotNull(chatWholeRect, rectDaily)
+                Box(modifier = Modifier.fillMaxSize()) {
+                    // Non-blocking spotlight overlay.
+                    TutorialSpotlightOverlay(
+                        rects = highlightRects,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .zIndex(9000f)
+                    )
+
+                    // Non-dimmed Skip in upper-left corner.
+                    TextButton(
+                        onClick = {
+                            showHomeTutorial = false
+                            tutorialManager.markDone()
+                        },
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .statusBarsPadding()
+                            .padding(start = 10.dp, top = 10.dp)
+                            .zIndex(10001f)
+                    ) {
+                        Text("Skip", color = Color(0xFF1E88E5), fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+            25 -> CoachMarkOverlay(
+                steps = listOf(
+                    CoachStep(
+                        title = "AI Diet Assistant",
+                        body = "Let’s check out your profile. Click the carrot in the upper right corner.",
+                        targetRect = { rectProfile },
+                        // Keep the dialog away from the top-right target.
+                        cardPosition = CoachCardPosition.BOTTOM,
+                        showRobotHead = true,
+                        typewriterBody = true,
+                        allowTargetTapToAdvance = true,
+                        hideNextButton = true,
+                        onTargetTap = {
+                            // Keep step at 25 so the Profile screen starts at its first tutorial page.
+                            onOpenProfile()
+                        }
+                    )
+                ),
+                onSkip = {
+                    tutorialManager.requestSkipConfirm {
+                        showHomeTutorial = false
+                        tutorialManager.markDone()
+                    }
+                },
+                onComplete = { /* tap-to-advance */ },
+                modifier = Modifier.zIndex(10000f)
             )
         }
-
-        // If the user doesn't have a fasting window enabled, fake an example bar just above the chat input
-        // so they still understand what the feature looks like.
-        val fastingExampleRect = run {
-            if (rectFasting != null) return@run rectFasting
-            val input = rectChatInput ?: return@run null
-            val padPx = with(density) { 8.dp.toPx() }
-            val hPx = with(density) { 28.dp.toPx() }
-            val bottom = (input.top - padPx).coerceAtLeast(0f)
-            val top = (bottom - hPx).coerceAtLeast(0f)
-            Rect(left = input.left, top = top, right = input.right, bottom = bottom)
-        }
-
-        val fastingIsSet = (state.profile != null &&
-            state.profile.fastingPreset.name != "NONE" &&
-            state.profile.eatingWindowStartMinutes != null &&
-            state.profile.eatingWindowEndMinutes != null)
-
-        CoachMarkOverlay(
-            steps = listOf(
-                CoachStep(
-                    title = "Step 1: Add Food",
-                    body = "Add to List\nStart by adding foods you eat. This can be ingredients, snacks, or full meals. Everything else in the app builds from this.",
-                    targetRect = { rectAdd }
-                ),
-                CoachStep(
-                    title = "Step 2: Scan with AI",
-                    body = "AI Evaluate Food\nUse your camera to scan food items or menus. The AI analyzes nutrition and provides a health score.",
-                    targetRect = { rectScan }
-                ),
-                CoachStep(
-                    title = "Step 3: Create Recipes",
-                    body = "Generate Recipe\nCreate recipes using foods from your list or anything you want to cook. Save your favorite recipes to reuse later.",
-                    targetRect = { rectGen }
-                ),
-                CoachStep(
-                    title = "Step 4: Plan Your Day",
-                    body = "Daily Plan\nGenerate a daily meal plan with 1 to 3 meals based on your calorie goal. You can also choose to plan your day using only your saved recipes.",
-                    targetRect = { rectDaily }
-                ),
-                CoachStep(
-                    title = "Step 5: Use Chat",
-                    body = "Chat\nChat can see the foods you have added and the calories you have logged today. Get advice, add foods, track calories, or generate recipes all in one place.",
-                    targetRect = { chatWholeRect },
-                    cardPosition = CoachCardPosition.TOP
-                ),
-                CoachStep(
-                    title = "Step 6: Manage Everything",
-                    body = "Profile\nView your food list and saved recipes. Manage fasting settings and customize app options like text size or food icons.",
-                    targetRect = { rectProfile }
-                ),
-                CoachStep(
-                    title = "Step 7: Fasting Eating Window",
-                    body = if (fastingIsSet) {
-                        "This bar updates over time and shows when you can eat in orange and when you are fasting in blue."
-                    } else {
-                        "Set a fasting schedule in Profile to enable this bar. Orange shows eating time and blue shows fasting."
-                    },
-                    targetRect = { fastingExampleRect },
-                    cardPosition = CoachCardPosition.TOP
-                )
-            ),
-            onDone = {
-                showHomeTutorial = false
-                homeTutorialManager.markDone()
-            },
-            modifier = Modifier.zIndex(10000f)
-        )
-    }
-
-    if (showBeginnerIngredientsPicker) {
-        PopularIngredientsPickerDialog(
-            enabled = !state.isProcessing,
-            resolveIcon = { name -> FoodIconResolver.resolveFoodIconResId(context, name, allowFuzzy = true) },
-            onDismiss = {
-                showBeginnerIngredientsPicker = false
-                onMarkBeginnerIngredientsPickerSeen()
-            },
-            onGenerate = { picked, targetCalories ->
-                showBeginnerIngredientsPicker = false
-                // Add selected ingredients to the user's list (as INGREDIENT), then generate meal immediately.
-                onAddIngredients(picked)
-                onMarkBeginnerIngredientsPickerSeen()
-                onGenerateMeal(picked, targetCalories, false)
-            }
-        )
     }
 
     if (showExistingIngredientsPicker) {
@@ -2040,15 +2344,36 @@ fun HomeScreen(
                 .distinctBy { it.lowercase() }
                 .sortedBy { it.lowercase() }
         }
+
+        val tutStep = tutorialManager.step()
+        val tutActive = tutorialManager.shouldShow() && tutStep in 16..19
+
         ExistingIngredientsPickerDialog(
             candidates = candidates,
             enabled = !state.isProcessing,
             resolveIcon = { name -> FoodIconResolver.resolveFoodIconResId(context, name, allowFuzzy = true) },
-            onDismiss = { showExistingIngredientsPicker = false },
+            onDismiss = {
+                // During the locked tutorial step, don't allow dismiss.
+                if (!(tutActive && tutStep == 19)) {
+                    showExistingIngredientsPicker = false
+                }
+            },
             onGenerate = { picked, targetCalories, strictOnly ->
                 showExistingIngredientsPicker = false
+                if (tutActive && tutStep == 19) {
+                    tutorialManager.setStep(20)
+                }
                 onGenerateMeal(picked, targetCalories, strictOnly)
-            }
+            },
+            tutorialStep = tutStep,
+            tutorialActive = tutActive,
+            onTutorialSkip = {
+                tutorialManager.requestSkipConfirm {
+                    showExistingIngredientsPicker = false
+                    tutorialManager.markDone()
+                }
+            },
+            onTutorialNext = { tutorialManager.setStep(tutStep + 1) }
         )
     }
 
@@ -2056,6 +2381,8 @@ fun HomeScreen(
         DailyPlanPopup(
             hasSavedRecipes = state.savedRecipes.isNotEmpty(),
             enabled = !state.isProcessing,
+            tutorialManager = tutorialManager,
+            onCloseRect = { /* handled internally */ },
             onDismiss = { showDailyPlanPopup = false },
             onGenerate = { target, count, savedOnly ->
                 showDailyPlanPopup = false
@@ -2168,7 +2495,7 @@ fun HomeScreen(
                 }
 
                 // Progress bar
-                Surface(
+        Surface(
                     shape = RoundedCornerShape(999.dp),
                     color = MaterialTheme.colorScheme.surface
                 ) {
@@ -2190,65 +2517,180 @@ fun HomeScreen(
     }
 
     if (showScanPicker) {
-        Dialog(onDismissRequest = { showScanPicker = false }) {
-            Surface(shape = RoundedCornerShape(16.dp), tonalElevation = 8.dp) {
-                Column(
+        val tutActive = tutorialManager.shouldShow()
+        val tutStep = tutorialManager.step()
+        val inEvalTutorial = tutActive && tutStep in 12..14
+        var rectEvalClose by remember { mutableStateOf<Rect?>(null) }
+
+        fun closeEval() {
+            // During the tutorial, only allow closing when we explicitly instruct it (step 14).
+            if (inEvalTutorial && tutStep != 14) return
+
+            showScanPicker = false
+            if (inEvalTutorial && tutStep == 14) {
+                // Back on Home, continue with Generate Meal walkthrough.
+                tutorialManager.setStep(15)
+            }
+        }
+
+        Dialog(
+            onDismissRequest = {
+                if (!inEvalTutorial) showScanPicker = false
+            }
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .navigationBarsPadding()
+                    .padding(16.dp)
+            ) {
+                // The Evaluate popup (one box)
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    tonalElevation = 8.dp,
                     modifier = Modifier
+                        .align(Alignment.Center)
                         .fillMaxWidth()
-                        .padding(16.dp)
-                        .navigationBarsPadding(),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text(
-                            text = "Evaluate",
-                            fontWeight = FontWeight.SemiBold,
-                            style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.weight(1f)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Evaluate",
+                                fontWeight = FontWeight.SemiBold,
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            val closeEnabled = !inEvalTutorial || tutStep == 14
+                            TextButton(
+                                onClick = { closeEval() },
+                                enabled = closeEnabled,
+                                colors = if (inEvalTutorial && tutStep == 14) {
+                                    ButtonDefaults.textButtonColors(contentColor = Color(0xFF1E88E5))
+                                } else {
+                                    ButtonDefaults.textButtonColors()
+                                },
+                                modifier = Modifier
+                                    .padding(start = 8.dp)
+                                    .onGloballyPositioned { coords -> rectEvalClose = coords.boundsInRoot() }
+                            ) { Text("Close") }
+                        }
+
+                        // During tutorial, we don't want accidental navigation away.
+                        val canTap = !inEvalTutorial
+                        // Keep buttons visually normal even when disabled by the tutorial.
+                        val alpha = 1f
+
+                        Image(
+                            painter = painterResource(id = R.drawable.btn_food_item),
+                            contentDescription = "Food Item",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(72.dp)
+                                .clickable(enabled = canTap) {
+                                    showScanPicker = false
+                                    onOpenGroceryScan()
+                                },
+                            contentScale = ContentScale.Fit,
+                            alpha = alpha
                         )
-                        TextButton(
-                            onClick = { showScanPicker = false },
-                            modifier = Modifier.padding(start = 8.dp)
-                        ) { Text("Close") }
+                        Image(
+                            painter = painterResource(id = R.drawable.btn_menu),
+                            contentDescription = "Menu",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(72.dp)
+                                .clickable(enabled = canTap) {
+                                    showScanPicker = false
+                                    onOpenMenuScan()
+                                },
+                            contentScale = ContentScale.Fit,
+                            alpha = alpha
+                        )
+                    }
+                }
+
+                // The Tutorial card (a separate box above the Evaluate popup)
+                if (inEvalTutorial) {
+                    val msg = when (tutStep) {
+                        12 -> "Here we can select a Food Item to take a picture of, like if you’re in a grocery store and want my opinion before you buy it."
+                        13 -> "Or you can take a picture of a menu, and I can recommend a menu item that fits your diet."
+                        else -> "Let’s close this for now. I just have a few more things to show you."
                     }
 
-                    val canTap = true
-                    val alpha = if (canTap) 1f else 0.45f
+                    TutorialMessageCard(
+                        text = msg,
+                        onSkip = {
+                            tutorialManager.requestSkipConfirm {
+                                showScanPicker = false
+                                tutorialManager.markDone()
+                            }
+                        },
+                        onNext = when (tutStep) {
+                            12, 13 -> ({ tutorialManager.setStep(tutStep + 1) })
+                            else -> null
+                        },
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .padding(top = 8.dp)
+                            .zIndex(9000f)
+                    )
+                }
 
-                    Image(
-                        painter = painterResource(id = R.drawable.btn_food_item),
-                        contentDescription = "Food Item",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(72.dp)
-                            .clickable(enabled = canTap) {
-                                showScanPicker = false
-                                onOpenGroceryScan()
-                            },
-                        contentScale = ContentScale.Fit,
-                        alpha = alpha
-                    )
-                    Image(
-                        painter = painterResource(id = R.drawable.btn_menu),
-                        contentDescription = "Menu",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(72.dp)
-                            .clickable(enabled = canTap) {
-                                showScanPicker = false
-                                onOpenMenuScan()
-                            },
-                        contentScale = ContentScale.Fit,
-                        alpha = alpha
-                    )
+                // Step 14: only highlight Close, and make it the only tappable option.
+                if (inEvalTutorial && tutStep == 14) {
+                    rectEvalClose?.let { r ->
+                        TutorialSpotlightBlocker(
+                            targetRect = { r },
+                            onTargetTap = { closeEval() },
+                            modifier = Modifier
+                                .matchParentSize()
+                                .zIndex(9999f),
+                            // No dim, just a highlight outline and tap-blocking.
+                            scrimAlpha = 0f
+                        )
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun TypewriterTutorialText(
+    fullText: String,
+    modifier: Modifier = Modifier
+) {
+    var shown by remember(fullText) { mutableStateOf("") }
+    LaunchedEffect(fullText) {
+        shown = ""
+        for (i in fullText.indices) {
+            shown = fullText.substring(0, i + 1)
+            // Pause on "..." for readability.
+            if (i >= 2 && fullText[i - 2] == '.' && fullText[i - 1] == '.' && fullText[i] == '.') {
+                delay(1500L)
+            } else if (fullText[i] == '…') {
+                delay(1500L)
+            } else {
+                delay(12L)
+            }
+        }
+    }
+    Text(
+        text = shown,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier
+    )
 }
 
 
@@ -2256,6 +2698,8 @@ fun HomeScreen(
 private fun DailyPlanPopup(
     hasSavedRecipes: Boolean,
     enabled: Boolean,
+    tutorialManager: HomeTutorialManager,
+    onCloseRect: (Rect?) -> Unit,
     onDismiss: () -> Unit,
     onGenerate: (targetCalories: Int?, mealCount: Int, savedRecipesOnly: Boolean) -> Unit
 ) {
@@ -2271,31 +2715,58 @@ private fun DailyPlanPopup(
         else -> 2000
     }
 
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(shape = RoundedCornerShape(16.dp), tonalElevation = 8.dp) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-                    .navigationBarsPadding(),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+    val tutActive = tutorialManager.shouldShow()
+    val tutStep = tutorialManager.step()
+    val inTut = tutActive && tutStep in 23..24
+    val lockDismiss = inTut
+    var rectClose by remember { mutableStateOf<Rect?>(null) }
+    // During the Daily Plan tutorial, prevent interacting with the popup controls (Generate, sliders, etc.).
+    // Step 23: user should tap Next. Step 24: user should tap Close only.
+    val controlsEnabled = enabled && !inTut
+
+    Dialog(onDismissRequest = { if (!lockDismiss) onDismiss() }) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                tonalElevation = 8.dp,
+                modifier = Modifier.align(Alignment.Center)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                        .navigationBarsPadding(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text(
-                        text = "Daily Plan",
-                        fontWeight = FontWeight.SemiBold,
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.padding(start = 8.dp)
-                    ) { Text("Close") }
-                }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Daily Plan",
+                            fontWeight = FontWeight.SemiBold,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        val closeEnabled = !inTut || tutStep == 24
+                        TextButton(
+                            onClick = {
+                                if (!closeEnabled) return@TextButton
+                                onDismiss()
+                                if (tutActive && tutStep == 24) {
+                                    tutorialManager.setStep(25)
+                                }
+                            },
+                            enabled = closeEnabled && enabled,
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .onGloballyPositioned { coords ->
+                                    rectClose = coords.boundsInRoot()
+                                    onCloseRect(rectClose)
+                                }
+                        ) { Text("Close") }
+                    }
 
                 Text("Meals", fontWeight = FontWeight.SemiBold)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2303,7 +2774,7 @@ private fun DailyPlanPopup(
                         val selected = mealCount == n
                         Button(
                             onClick = { mealCount = n },
-                            enabled = enabled,
+                            enabled = controlsEnabled,
                             colors = androidx.compose.material3.ButtonDefaults.buttonColors(
                                 containerColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
                                 contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
@@ -2321,7 +2792,7 @@ private fun DailyPlanPopup(
                                 preset = p
                                 sliderValue = presetValue().toFloat()
                             },
-                            enabled = enabled,
+                            enabled = controlsEnabled,
                             colors = androidx.compose.material3.ButtonDefaults.buttonColors(
                                 containerColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
                                 contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
@@ -2339,7 +2810,7 @@ private fun DailyPlanPopup(
                     onValueChange = { sliderValue = it },
                     valueRange = 800f..3000f,
                     steps = 0,
-                    enabled = enabled,
+                    enabled = controlsEnabled,
                     colors = androidx.compose.material3.SliderDefaults.colors(
                         thumbColor = green,
                         activeTrackColor = green,
@@ -2367,13 +2838,13 @@ private fun DailyPlanPopup(
                     Switch(
                         checked = savedOnly,
                         onCheckedChange = { savedOnly = it },
-                        enabled = enabled && hasSavedRecipes
+                        enabled = controlsEnabled && hasSavedRecipes
                     )
                 }
 
                 val target = sliderValue.toInt().coerceIn(800, 3000)
 
-                val canGenerate = enabled
+                val canGenerate = controlsEnabled
                 val alpha = if (canGenerate) 1f else 0.45f
                 androidx.compose.foundation.Image(
                     painter = painterResource(id = R.drawable.generate_plan),
@@ -2387,6 +2858,57 @@ private fun DailyPlanPopup(
                     contentScale = ContentScale.Fit,
                     alpha = alpha
                 )
+
+            }
+        }
+
+            // Tutorial message inside the SAME dialog (separate box above the popup),
+            // so it doesn't block taps like a second Dialog would.
+            if (inTut) {
+                val msg = if (tutStep == 23) {
+                    "Here we can use your saved recipes and set the calories you would like to stay under, and I’ll try my best to create a daily plan for the day!"
+                } else {
+                    "Let’s close out of this for now."
+                }
+
+                TutorialMessageCard(
+                    text = msg,
+                    onSkip = {
+                        tutorialManager.requestSkipConfirm {
+                            onDismiss()
+                            tutorialManager.markDone()
+                        }
+                    },
+                    onNext = if (tutStep == 23) ({ tutorialManager.setStep(24) }) else null,
+                    modifier = Modifier
+                        .align(if (tutStep == 24) Alignment.BottomCenter else Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .padding(
+                            top = if (tutStep == 24) 0.dp else 8.dp,
+                            bottom = if (tutStep == 24) 12.dp else 0.dp,
+                            start = 16.dp,
+                            end = 16.dp
+                        )
+                        .zIndex(12000f)
+                )
+            }
+
+            // Step 24: block taps everywhere except Close, so the user must close the popup.
+            if (inTut && tutStep == 24) {
+                rectClose?.let { r ->
+                    TutorialSpotlightBlocker(
+                        targetRect = { r },
+                        onTargetTap = {
+                            onDismiss()
+                            tutorialManager.setStep(25)
+                        },
+                        modifier = Modifier
+                            .matchParentSize()
+                            .zIndex(13000f),
+                        // No extra dim; just outline + tap-blocking.
+                        scrimAlpha = 0f
+                    )
+                }
             }
         }
     }

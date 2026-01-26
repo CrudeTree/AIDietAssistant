@@ -47,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.matchpoint.myaidietapp.model.DietType
 import com.matchpoint.myaidietapp.model.FastingPreset
 import com.matchpoint.myaidietapp.model.UserProfile
@@ -55,6 +56,7 @@ import com.matchpoint.myaidietapp.model.WeightUnit
 @Composable
 fun SettingsScreen(
     profile: UserProfile,
+    tutorialManager: HomeTutorialManager,
     isProcessing: Boolean,
     errorText: String?,
     onBack: () -> Unit,
@@ -72,7 +74,6 @@ fun SettingsScreen(
     wallpaperSeed: Int
 ) {
     val ctx = LocalContext.current
-    val tutorialManager = remember(ctx) { HomeTutorialManager(ctx.applicationContext) }
     val tomatoId = remember {
         // User asked for "tomatoe" preview; your actual drawable is ic_food_tomato.webp.
         // We'll try a few common variants.
@@ -253,6 +254,20 @@ fun SettingsScreen(
                     onCheckedChange = { onToggleShowVineOverlay(it) },
                     enabled = !isProcessing
                 )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Button(
+                onClick = {
+                    // Replay the guided tour on Home.
+                    tutorialManager.requestReplay()
+                    onGoHome()
+                },
+                enabled = !isProcessing,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Show Tutorial")
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -525,6 +540,51 @@ fun SettingsScreen(
                     modifier = Modifier.size(168.dp)
                 )
             }
+            }
+
+            // Tutorial overlay for Settings screen (steps 30–33).
+            val tutActive = tutorialManager.shouldShow()
+            val tutStep = tutorialManager.step()
+            if (tutActive && tutStep in 30..33) {
+                val msg = when (tutStep) {
+                    30 -> "Here you can adjust all kinds of things such as font size or remove the wallpaper if you find it distracting. You can even set your diet type here! I’ll have access to what type of diet you have, and I’ll be sure to not only give you a health rating but also a diet rating for food you add to your list."
+                    31 -> "Some people really get into intermittent fasting! Intermittent fasting is a great way to control your weight!"
+                    32 -> "If you’d like to try it out, select your fasting schedule and eating window start, and I’ll add a fasting visual monitor to the main page. If you see the fasting bar on the left in orange, that means you can eat. If it’s blue, that’s when you don’t eat. This visual bar will update in real time."
+                    else -> "That concludes my tutorial! I can’t wait to start making delicious meals with you!"
+                }
+
+                TutorialMessageCard(
+                    text = msg,
+                    onSkip = {
+                        tutorialManager.requestSkipConfirm {
+                            tutorialManager.markDone()
+                        }
+                    },
+                    onNext = {
+                        if (tutStep in 30..32) tutorialManager.setStep(tutStep + 1)
+                        else tutorialManager.markDone()
+                    },
+                    nextLabel = if (tutStep == 33) "Done" else "Next",
+                    // Gray background so the dialog contrasts with the black app background.
+                    containerColor = Color(0xFF3A3A3A),
+                    extraContent = if (tutStep == 32) {
+                        {
+                            Image(
+                                painter = painterResource(id = com.matchpoint.myaidietapp.R.drawable.fasting_bar_example),
+                                contentDescription = "Fasting bar example",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(56.dp)
+                                    .padding(top = 6.dp),
+                                contentScale = ContentScale.Fit
+                            )
+                        }
+                    } else null,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 24.dp, start = 16.dp, end = 16.dp)
+                        .zIndex(10000f)
+                )
             }
         }
     }

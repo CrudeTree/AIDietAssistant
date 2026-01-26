@@ -44,8 +44,8 @@ fun PaymentScreen(
     val tierLabel = when (selectedTier) {
         // We keep the internal enum names (REGULAR/PRO) for backward compatibility,
         // but present them as Basic/Premium to users.
-        SubscriptionTier.REGULAR -> if (billingCycle == com.matchpoint.myaidietapp.ui.BillingCycle.YEARLY) "Basic — $99.99/year" else "Basic — $9.99/month"
-        SubscriptionTier.PRO -> if (billingCycle == com.matchpoint.myaidietapp.ui.BillingCycle.YEARLY) "Premium — $199.99/year" else "Premium — $19.99/month"
+        SubscriptionTier.REGULAR -> if (billingCycle == com.matchpoint.myaidietapp.ui.BillingCycle.YEARLY) "Basic: $99.99/year" else "Basic: $9.99/month"
+        SubscriptionTier.PRO -> if (billingCycle == com.matchpoint.myaidietapp.ui.BillingCycle.YEARLY) "Premium: $199.99/year" else "Premium: $19.99/month"
         SubscriptionTier.FREE, null -> "Free"
     }
 

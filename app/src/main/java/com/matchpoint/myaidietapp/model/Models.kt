@@ -144,6 +144,16 @@ data class FoodItem(
 )
 
 data class UserProfile(
+    /**
+     * Convenience copy of the Firebase Auth email for easier identification in the Firestore console.
+     * Nullable for backward compatibility with existing users.
+     */
+    val email: String? = null,
+    /**
+     * Same as [email], but prefixed so it appears near the top of the Firestore console field list.
+     * (Firestore UI typically sorts fields alphabetically.)
+     */
+    val _email: String? = null,
     val name: String = "",
     /**
      * Preferred display/input unit for weights. Defaults to LB for new users.
@@ -197,6 +207,24 @@ data class UserProfile(
      */
     val eatingWindowStartMinutes: Int? = null,
     val eatingWindowEndMinutes: Int? = null,
+    /**
+     * Tutorial analytics: highest step reached (clamped client-side to [tutorialTotalSteps]).
+     * This lets us see where users drop off.
+     */
+    val tutorialProgressSteps: Int = 0,
+    /**
+     * Tutorial analytics: total steps in the guided tour (for display like "4/32").
+     * Kept in Firestore so we can change totals later without confusing old records.
+     */
+    val tutorialTotalSteps: Int = 32,
+    /**
+     * Tutorial analytics: convenience string like "4/32" to quickly scan in Firestore console.
+     */
+    val tutorialProgressText: String? = null,
+    /**
+     * Tutorial analytics: when we last updated tutorial progress.
+     */
+    val tutorialProgressUpdatedAt: Timestamp? = null,
     val allowedFoods: List<String> = emptyList(),
     val inventory: Map<String, Int> = emptyMap(),
     val foodItems: List<FoodItem> = emptyList(),
