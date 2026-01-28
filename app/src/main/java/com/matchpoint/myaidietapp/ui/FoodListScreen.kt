@@ -68,6 +68,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.window.Dialog
 import androidx.compose.foundation.shape.RoundedCornerShape
 import kotlinx.coroutines.delay
@@ -85,7 +86,8 @@ fun FoodListScreen(
     onRemoveFood: (String) -> Unit,
     onUpdateCategories: (foodId: String, categories: Set<String>) -> Unit,
     onAddText: (category: String) -> Unit,
-    onAddPhotos: (category: String) -> Unit,
+    onAddFindIngredients: (names: List<String>) -> Unit,
+    onAddPhoto: (category: String) -> Unit,
     onOpenAddFoodHub: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -99,6 +101,7 @@ fun FoodListScreen(
     var editIngredient by remember { mutableStateOf(false) }
     var editSnack by remember { mutableStateOf(false) }
     var showAddChooser by remember { mutableStateOf(false) }
+    var showFindPicker by remember { mutableStateOf(false) }
     // Toggle to show/hide per-item descriptive lines for easier scanning.
     var showDescriptions by rememberSaveable(filterCategory) { mutableStateOf(true) }
     // Toggle to sort the current list alphabetically by name.
@@ -125,6 +128,22 @@ fun FoodListScreen(
                 "INGREDIENT" -> "Ingredients"
                 "SNACK" -> "Snacks"
                 else -> "All items"
+            }
+            val catKey = filterCategory?.trim()?.uppercase()
+            val addTitle = when (catKey) {
+                "INGREDIENT" -> "Add Ingredient"
+                "SNACK" -> "Add Snack"
+                "MEAL" -> "Add Meal"
+                else -> "Add Item"
+            }
+            val addBody = if (filterCategory.isNullOrBlank()) {
+                "Open the add screen to create a new ingredient, snack, or meal."
+            } else {
+                if (catKey == "INGREDIENT") {
+                    "Add to your ingredients list. You can add by typing, or use Find to pick from the icon library."
+                } else {
+                    "Add to your ${pageTitle.lowercase()} list by typing."
+                }
             }
             Box(modifier = Modifier.fillMaxWidth()) {
                 IconButton(
@@ -160,6 +179,11 @@ fun FoodListScreen(
                     modifier = Modifier
                         .align(Alignment.CenterEnd)
                         .onGloballyPositioned { coords -> rectAddButton = coords.boundsInRoot() }
+                        .helperTarget(
+                            id = "food_list_add_${catKey ?: "ALL"}",
+                            title = addTitle,
+                            body = addBody
+                        )
                         .size(56.dp)
                 ) {
                     Image(
@@ -250,7 +274,12 @@ fun FoodListScreen(
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
+                    .weight(1f)
+                    .helperTarget(
+                        id = "food_list_area_${catKey ?: "ALL"}",
+                        title = "Your list",
+                        body = "This is where your items will appear.\n\nTap the blue + button in the upper right to add foods. Once you add ingredients, I can use them to generate recipes and help evaluate foods."
+                    ),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(displayList) { item ->
@@ -356,27 +385,77 @@ fun FoodListScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
 
-                        val nutritionLine = buildString {
-                            val cals = item.estimatedCalories
-                            val p = item.estimatedProteinG
-                            val c = item.estimatedCarbsG
-                            val f = item.estimatedFatG
-                            if (cals != null) append("≈${cals} kcal")
-                            if (p != null || c != null || f != null) {
+                        val caloriesLine = buildString {
+                            val kind = item.portionKind?.trim()?.uppercase()
+                            val perServingCals = item.caloriesPerServing ?: item.estimatedCalories
+                            val servingText = item.servingSizeText?.trim().orEmpty()
+                            val servingsPerContainer = item.servingsPerContainer
+
+                            if (perServingCals != null) {
+                                // Always phrase as "per serving" in the list.
+                                // For plated foods, the backend sets servingSizeText to "1 plate"/"1 bowl", etc.
+                                append("Calories per serving: ≈")
+                                append(perServingCals)
+                                append(" kcal")
+
+                                val st = when {
+                                    servingText.isNotBlank() -> servingText
+                                    kind == "PLATED" -> "1 plate"
+                                    else -> ""
+                                }
+                                if (st.isNotBlank()) {
+                                    append(" (")
+                                    append(st)
+                                    append(")")
+                                }
+                            }
+
+                            // Packaged: if we know servings/container, show whole-package estimate too.
+                            if (item.caloriesPerServing != null && servingsPerContainer != null && servingsPerContainer > 0.0) {
+                                val whole = (item.caloriesPerServing * servingsPerContainer).let { kotlin.math.round(it).toInt() }
                                 if (isNotBlank()) append(" • ")
-                                append(
-                                    listOfNotNull(
-                                        p?.let { "P${it}g" },
-                                        c?.let { "C${it}g" },
-                                        f?.let { "F${it}g" }
-                                    ).joinToString(" ")
-                                )
+                                append("Servings per container: ")
+                                append(servingsPerContainer)
+                                append(" • Whole package: ≈")
+                                append(whole)
+                                append(" kcal")
                             }
                         }.ifBlank { null }
 
-                        if (!nutritionLine.isNullOrBlank()) {
+                        if (!caloriesLine.isNullOrBlank()) {
                             Text(
-                                text = nutritionLine,
+                                text = caloriesLine,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        val macrosLine = buildString {
+                            val p = item.estimatedProteinG
+                            val c = item.estimatedCarbsG
+                            val f = item.estimatedFatG
+                            if (p != null) {
+                                append("Protein: ")
+                                append(p)
+                                append("g")
+                            }
+                            if (c != null) {
+                                if (isNotBlank()) append(" • ")
+                                append("Carbohydrates: ")
+                                append(c)
+                                append("g")
+                            }
+                            if (f != null) {
+                                if (isNotBlank()) append(" • ")
+                                append("Fat: ")
+                                append(f)
+                                append("g")
+                            }
+                        }.ifBlank { null }
+
+                        if (!macrosLine.isNullOrBlank()) {
+                            Text(
+                                text = macrosLine,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -450,16 +529,15 @@ fun FoodListScreen(
                         }
 
                         TypewriterTutorialText(
-                            fullText = "You can add ingredients by either text or taking a photo. But for now, let’s just add it by text.",
+                            fullText = "Let’s add your first ingredient by typing it in.",
                             modifier = Modifier.fillMaxWidth()
                         )
 
                         Spacer(modifier = Modifier.height(4.dp))
 
-                        Row(
+                        Column(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             val green = Color(0xFF22C55E)
                             Button(
@@ -468,52 +546,161 @@ fun FoodListScreen(
                                     tutorialManager.setStep(6)
                                     onAddText("INGREDIENT")
                                 },
-                                colors = ButtonDefaults.buttonColors(containerColor = green)
+                                colors = ButtonDefaults.buttonColors(containerColor = green),
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text("Text", color = Color.White, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "Text",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+
+                            // Show the other options, but keep them disabled during this tutorial step
+                            // so we don't break the guided flow.
+                            Button(
+                                onClick = { /* disabled in tutorial */ },
+                                enabled = false,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    "Find",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                             }
 
                             Button(
-                                onClick = { /* disabled during tutorial */ },
-                                enabled = false
-                            ) { Text("Photos") }
+                                onClick = { /* disabled in tutorial */ },
+                                enabled = false,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    "Photo",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
                         }
-
-                        Text(
-                            text = "Tip: You can add photos later any time.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Start
-                        )
                     }
                 }
             }
         } else {
-            AlertDialog(
-                onDismissRequest = { showAddChooser = false },
-                title = { Text("Add to ${when (cat) { "MEAL" -> "Meals"; "INGREDIENT" -> "Ingredients"; else -> "Snacks" }}") },
-                text = { Text("How do you want to add it?") },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            showAddChooser = false
-                            onAddText(cat)
-                        }
-                    ) { Text("Text") }
-                },
-                dismissButton = {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = {
-                                showAddChooser = false
-                                onAddPhotos(cat)
+            Dialog(onDismissRequest = { showAddChooser = false }) {
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    tonalElevation = 10.dp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Add to ${when (cat) { "MEAL" -> "Meals"; "INGREDIENT" -> "Ingredients"; else -> "Snacks" }}",
+                                fontWeight = FontWeight.SemiBold,
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(onClick = { showAddChooser = false }, modifier = Modifier.padding(start = 8.dp)) {
+                                Text(text = "Close", maxLines = 1, softWrap = false)
                             }
-                        ) { Text("Photos") }
-                        Button(onClick = { showAddChooser = false }) { Text("Cancel") }
+                        }
+
+                        Text("How do you want to add it?")
+
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    showAddChooser = false
+                                    onAddText(cat)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    "Text",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+
+                            if (cat == "INGREDIENT") {
+                                Button(
+                                    onClick = {
+                                        showAddChooser = false
+                                        showFindPicker = true
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        "Find",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
+
+                            Button(
+                                onClick = {
+                                    showAddChooser = false
+                                    onAddPhoto(cat)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    "Photo",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
                     }
                 }
-            )
+            }
         }
+    }
+
+    if (showFindPicker) {
+        val remainingSlots = (totalLimit - items.size).coerceAtLeast(0)
+        AllFoodIconsPickerDialog(
+            onDismiss = { showFindPicker = false },
+            onAddSelected = { picked ->
+                showFindPicker = false
+                if (picked.isNotEmpty()) onAddFindIngredients(picked)
+            },
+            remainingSlots = remainingSlots,
+            title = "Find ingredients"
+        )
     }
 
     editing?.let { item ->

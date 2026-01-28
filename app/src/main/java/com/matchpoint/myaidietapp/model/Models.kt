@@ -50,6 +50,12 @@ enum class RecipeTitleFontStyle {
     FARMHOUSE_ARTISAN
 }
 
+enum class RecipeDifficulty {
+    SIMPLE,
+    ADVANCED,
+    EXPERT
+}
+
 data class WeightEntry(
     val date: String = "",
     /**
@@ -121,6 +127,16 @@ data class FoodItem(
     val estimatedCarbsG: Int? = null,
     val estimatedFatG: Int? = null,
     val ingredientsText: String? = null,
+    /**
+     * Serving-size helpers (mainly populated by AI Evaluate Food photo analysis).
+     *
+     * - PACKAGED: macros are per serving; caloriesPerServing is the serving-size calories
+     * - PLATED: the whole pictured plate is considered 1 serving; estimatedCalories/macros are for the whole plate
+     */
+    val portionKind: String? = null, // "PACKAGED" | "PLATED" | "UNKNOWN"
+    val servingSizeText: String? = null, // e.g. "3 cookies (34g)" or "1 plate"
+    val caloriesPerServing: Int? = null,
+    val servingsPerContainer: Double? = null,
     /**
      * General health rating (1-10) regardless of diet.
      */

@@ -1,5 +1,6 @@
 package com.matchpoint.myaidietapp
 
+import android.content.Context
 import com.google.firebase.appcheck.FirebaseAppCheck
 import com.google.firebase.appcheck.playintegrity.PlayIntegrityAppCheckProviderFactory
 
@@ -7,7 +8,7 @@ import com.google.firebase.appcheck.playintegrity.PlayIntegrityAppCheckProviderF
  * Release build: use Play Integrity App Check provider.
  */
 object AppCheckInstaller {
-    fun install() {
+    fun install(context: Context) {
         FirebaseAppCheck.getInstance()
             .installAppCheckProviderFactory(PlayIntegrityAppCheckProviderFactory.getInstance())
     }

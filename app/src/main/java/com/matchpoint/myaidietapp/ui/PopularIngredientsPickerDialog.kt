@@ -38,13 +38,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.matchpoint.myaidietapp.R
+import com.matchpoint.myaidietapp.model.RecipeDifficulty
 
 @Composable
 fun PopularIngredientsPickerDialog(
     enabled: Boolean,
     resolveIcon: (String) -> Int?,
     onDismiss: () -> Unit,
-    onGenerate: (picked: List<String>, targetCalories: Int?) -> Unit
+    onGenerate: (picked: List<String>, targetCalories: Int?, difficulty: RecipeDifficulty) -> Unit
 ) {
     val popular = remember {
         listOf(
@@ -58,6 +59,7 @@ fun PopularIngredientsPickerDialog(
     }
     var picked by rememberSaveable { mutableStateOf(setOf<String>()) }
     var sliderValue by rememberSaveable { mutableStateOf(500f) }
+    var difficultyName by rememberSaveable { mutableStateOf(RecipeDifficulty.SIMPLE.name) }
     val green = Color(0xFF22C55E)
 
     Dialog(onDismissRequest = onDismiss) {
@@ -138,6 +140,46 @@ fun PopularIngredientsPickerDialog(
                         modifier = Modifier.fillMaxWidth()
                     )
 
+                    Text(
+                        text = "Difficulty",
+                        fontWeight = FontWeight.SemiBold,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val pickedDifficulty = runCatching { RecipeDifficulty.valueOf(difficultyName) }.getOrNull()
+                            ?: RecipeDifficulty.SIMPLE
+                        listOf(
+                            RecipeDifficulty.SIMPLE to "Simple",
+                            RecipeDifficulty.ADVANCED to "Advanced",
+                            RecipeDifficulty.EXPERT to "Expert"
+                        ).forEach { (diff, label) ->
+                            val isOn = pickedDifficulty == diff
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                tonalElevation = 0.dp,
+                                color = if (isOn) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Transparent,
+                                border = androidx.compose.foundation.BorderStroke(
+                                    1.dp,
+                                    if (isOn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f)
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable(enabled = enabled) { difficultyName = diff.name }
+                            ) {
+                                Text(
+                                    text = label,
+                                    modifier = Modifier.padding(vertical = 10.dp, horizontal = 10.dp),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = if (isOn) FontWeight.SemiBold else FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+
                     // Only the list scrolls, so the Generate button stays reachable.
                     LazyColumn(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -198,7 +240,11 @@ fun PopularIngredientsPickerDialog(
                         resId = R.drawable.generate_meal,
                         contentDescription = "Generate meal",
                         enabled = canGenerate,
-                        onClick = { onGenerate(picked.toList(), sliderValue.toInt().coerceIn(100, 1000)) }
+                        onClick = {
+                            val diff = runCatching { RecipeDifficulty.valueOf(difficultyName) }.getOrNull()
+                                ?: RecipeDifficulty.SIMPLE
+                            onGenerate(picked.toList(), sliderValue.toInt().coerceIn(100, 1000), diff)
+                        }
                     )
                 }
             }

@@ -14,6 +14,8 @@ class HomeTutorialManager(context: Context) {
     // Analytics: highest tutorial step index the user has reached (monotonic).
     private val maxStepState = mutableIntStateOf(prefs.getInt(KEY_MAX_STEP, 0))
     private val skipConfirmActionState = mutableStateOf<(() -> Unit)?>(null)
+    // External hook (best-effort) to persist progress, e.g. to Firestore.
+    private val progressListenerState = mutableStateOf<((Int) -> Unit)?>(null)
 
     /**
      * The tutorial shows when explicitly requested (Settings -> Show Tutorial),
@@ -28,6 +30,7 @@ class HomeTutorialManager(context: Context) {
             .apply()
         requestShowState.value = true
         stepState.intValue = 0
+        progressListenerState.value?.invoke(maxStepState.intValue)
     }
 
     fun requestReplay() {
@@ -40,6 +43,7 @@ class HomeTutorialManager(context: Context) {
         doneState.value = false
         requestShowState.value = true
         stepState.intValue = 0
+        progressListenerState.value?.invoke(maxStepState.intValue)
     }
 
     fun step(): Int = stepState.intValue
@@ -54,6 +58,12 @@ class HomeTutorialManager(context: Context) {
             prefs.edit().putInt(KEY_MAX_STEP, v).apply()
             maxStepState.intValue = v
         }
+        // Always emit the best-known progress (monotonic max).
+        progressListenerState.value?.invoke(maxStepState.intValue)
+    }
+
+    fun setProgressListener(listener: ((Int) -> Unit)?) {
+        progressListenerState.value = listener
     }
 
     fun requestSkipConfirm(onConfirmExit: () -> Unit) {
@@ -75,6 +85,7 @@ class HomeTutorialManager(context: Context) {
         doneState.value = true
         requestShowState.value = false
         stepState.intValue = 0
+        progressListenerState.value?.invoke(maxStepState.intValue)
     }
 
     fun resetForTesting() {

@@ -27,11 +27,24 @@ object RecipeParser {
     }
 
     private fun parseTitle(text: String): String {
-        val line = text.lineSequence()
-            .map { it.trim() }
-            .firstOrNull { it.startsWith("Title:", ignoreCase = true) }
-            ?: return ""
-        return line.substringAfter(":", "").trim()
+        val lines = text.lineSequence().map { it.trim() }.toList()
+
+        // Legacy format: "Title: ..."
+        val legacy = lines.firstOrNull { it.startsWith("Title:", ignoreCase = true) }
+        if (legacy != null) return legacy.substringAfter(":", "").trim()
+
+        // New format: markdown title heading, e.g. "# Creamy Bacon & Eggs"
+        // Ignore headings that are clearly section headers (e.g. "Ingredients").
+        for (l in lines) {
+            val t = l.trim()
+            if (!t.startsWith("#")) continue
+            val title = t.trimStart('#').trim()
+            if (title.isBlank()) continue
+            if (title.equals("ingredients", ignoreCase = true)) continue
+            return title
+        }
+
+        return ""
     }
 
     private fun parseIngredients(text: String): List<String> {
@@ -41,6 +54,8 @@ object RecipeParser {
         fun isSectionHeader(s: String): Boolean {
             val x = s.trim()
             if (x.isBlank()) return false
+            // Markdown headings end the ingredients section too (e.g. "## Cook")
+            if (x.startsWith("#")) return true
             return x.startsWith("Steps", ignoreCase = true) ||
                 x.startsWith("Cook time", ignoreCase = true) ||
                 x.startsWith("Temp", ignoreCase = true) ||
@@ -54,7 +69,8 @@ object RecipeParser {
         var startIdx = -1
         for (i in lines.indices) {
             val s = lines[i].trim()
-            if (s.startsWith("Ingredients", ignoreCase = true)) {
+            val plain = s.trimStart('#').trim()
+            if (plain.startsWith("Ingredients", ignoreCase = true)) {
                 startIdx = i + 1
                 break
             }

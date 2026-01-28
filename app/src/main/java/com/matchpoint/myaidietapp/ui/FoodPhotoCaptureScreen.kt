@@ -1,8 +1,13 @@
 package com.matchpoint.myaidietapp.ui
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.border
@@ -20,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -28,6 +34,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,10 +49,20 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
 import java.util.UUID
+
+private fun Context.findActivity(): Activity? {
+    var c: Context? = this
+    while (c is ContextWrapper) {
+        if (c is Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
 
 @Composable
 fun FoodPhotoCaptureScreen(
@@ -57,6 +74,7 @@ fun FoodPhotoCaptureScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val activity = remember(context) { context.findActivity() }
 
     // Photo flow does not take a quantity; it's always 1 per submitted item.
 
@@ -82,6 +100,7 @@ fun FoodPhotoCaptureScreen(
 
     var isUploading by remember { mutableStateOf(false) }
     var pendingCameraAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var showCameraSettingsDialog by remember { mutableStateOf(false) }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -89,6 +108,17 @@ fun FoodPhotoCaptureScreen(
             if (granted) {
                 pendingCameraAction?.invoke()
                 pendingCameraAction = null
+            } else {
+                // If the system is no longer showing the permission prompt (user selected
+                // "Don't ask again" or policy), guide them to Settings.
+                if (activity != null &&
+                    !ActivityCompat.shouldShowRequestPermissionRationale(
+                        activity,
+                        Manifest.permission.CAMERA
+                    )
+                ) {
+                    showCameraSettingsDialog = true
+                }
             }
         }
     )
@@ -102,6 +132,33 @@ fun FoodPhotoCaptureScreen(
             pendingCameraAction = action
             cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
+    }
+
+    if (showCameraSettingsDialog) {
+        AlertDialog(
+            onDismissRequest = { showCameraSettingsDialog = false },
+            title = { Text("Camera permission needed") },
+            text = {
+                Text(
+                    "Camera permission is currently blocked. Please enable Camera in your app settings to take photos."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showCameraSettingsDialog = false
+                        val intent = Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            android.net.Uri.parse("package:${context.packageName}")
+                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(intent)
+                    }
+                ) { Text("Open settings") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCameraSettingsDialog = false }) { Text("Cancel") }
+            }
+        )
     }
 
     var productCameraUri by remember { mutableStateOf<Uri?>(null) }

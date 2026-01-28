@@ -1,8 +1,13 @@
 package com.matchpoint.myaidietapp.ui
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.border
@@ -28,8 +33,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,6 +58,15 @@ import com.matchpoint.myaidietapp.R
 import kotlinx.coroutines.launch
 import java.util.UUID
 
+private fun Context.findActivity(): Activity? {
+    var c: Context? = this
+    while (c is ContextWrapper) {
+        if (c is Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
+
 @Composable
 fun MenuScanPhotoScreen(
     isProcessing: Boolean,
@@ -67,6 +83,8 @@ fun MenuScanPhotoScreen(
 
     var isUploading by remember { mutableStateOf(false) }
     var pendingCameraAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var showCameraSettingsDialog by remember { mutableStateOf(false) }
+    val activity = remember(context) { context.findActivity() }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -74,6 +92,15 @@ fun MenuScanPhotoScreen(
             if (granted) {
                 pendingCameraAction?.invoke()
                 pendingCameraAction = null
+            } else {
+                if (activity != null &&
+                    !androidx.core.app.ActivityCompat.shouldShowRequestPermissionRationale(
+                        activity,
+                        Manifest.permission.CAMERA
+                    )
+                ) {
+                    showCameraSettingsDialog = true
+                }
             }
         }
     )
@@ -183,6 +210,35 @@ fun MenuScanPhotoScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+
+    if (showCameraSettingsDialog) {
+        AlertDialog(
+            onDismissRequest = { showCameraSettingsDialog = false },
+            title = { Text("Camera permission needed") },
+            text = {
+                Text(
+                    "To take a photo, enable Camera permission in Settings.\n\n" +
+                        "Settings → Apps → AI Diet Assistant → Permissions → Camera"
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showCameraSettingsDialog = false
+                        val intent = Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", context.packageName, null)
+                        )
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(intent)
+                    }
+                ) { Text("Open settings") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCameraSettingsDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
     }
 }
 

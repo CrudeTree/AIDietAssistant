@@ -44,6 +44,14 @@ function asNullableInt(x) {
   return Math.round(n);
 }
 
+function asNullableNumber(x, { maxDecimals = 2 } = {}) {
+  if (x === null || x === undefined) return null;
+  const n = Number(x);
+  if (!Number.isFinite(n)) return null;
+  const p = Math.pow(10, Math.max(0, Math.min(6, Number(maxDecimals) || 0)));
+  return Math.round(n * p) / p;
+}
+
 function clampInt(n, min, max) {
   const x = Number(n);
   if (!Number.isFinite(x)) return min;
@@ -324,10 +332,23 @@ functions.http('checkin', async (req, res) => {
       return free; // FREE
     }
 
+    // Global anti-abuse cap: total OpenAI calls/day across chat + analysis.
+    // Defaults to (chat limit + analysis limit), but can be overridden via env.
+    function dailyTotalLimitForTier(t) {
+      const free = Number(process.env.DAILY_TOTAL_LIMIT_FREE || 0);
+      const regular = Number(process.env.DAILY_TOTAL_LIMIT_REGULAR || 0);
+      const pro = Number(process.env.DAILY_TOTAL_LIMIT_PRO || 0);
+      if (t === 'PRO' && Number.isFinite(pro) && pro > 0) return pro;
+      if (t === 'REGULAR' && Number.isFinite(regular) && regular > 0) return regular;
+      if (t === 'FREE' && Number.isFinite(free) && free > 0) return free;
+      return dailyChatLimitForTier(t) + dailyAnalysisLimitForTier(t);
+    }
+
     async function tryConsumeAnalysisQuota(cost) {
       const now = new Date();
       const dayKey = computeLocalDayKey({ clientLocalDate });
-      const limit = dailyAnalysisLimitForTier(tier);
+      const analysisLimit = dailyAnalysisLimitForTier(tier);
+      const totalLimit = dailyTotalLimitForTier(tier);
       const usageRef = db.collection('users').doc(uid).collection('meta').doc('usageDaily').collection('days').doc(dayKey);
 
       const c = Number(cost);
@@ -336,8 +357,14 @@ functions.http('checkin', async (req, res) => {
       try {
         await db.runTransaction(async (tx) => {
           const snap = await tx.get(usageRef);
-          const used = snap.exists ? Number(snap.data()?.analysisCount || 0) : 0;
-          if (used + inc > limit) {
+          const usedAnalysis = snap.exists ? Number(snap.data()?.analysisCount || 0) : 0;
+          const usedTotal = snap.exists ? Number(snap.data()?.totalCount || 0) : 0;
+          if (usedTotal + inc > totalLimit) {
+            const err = new Error('DAILY_TOTAL_LIMIT_REACHED');
+            err.code = 'LIMIT_TOTAL';
+            throw err;
+          }
+          if (usedAnalysis + inc > analysisLimit) {
             const err = new Error('DAILY_ANALYSIS_LIMIT_REACHED');
             err.code = 'LIMIT_ANALYSIS';
             throw err;
@@ -345,7 +372,8 @@ functions.http('checkin', async (req, res) => {
           tx.set(
             usageRef,
             {
-              analysisCount: used + inc,
+              analysisCount: usedAnalysis + inc,
+              totalCount: usedTotal + inc,
               tier,
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
             },
@@ -354,30 +382,39 @@ functions.http('checkin', async (req, res) => {
         });
         return true;
       } catch (e) {
-        if (e?.code === 'LIMIT_ANALYSIS') return false;
+        if (e?.code === 'LIMIT_ANALYSIS' || e?.code === 'LIMIT_TOTAL') return false;
         console.error('analysis quota transaction failed', e);
         // Fail closed to protect spend if quota check infrastructure is failing.
         return false;
       }
     }
 
-    // Count only "chat submissions" (not food photo analysis):
-    // - freeform chat
-    // - generate meal
-    // - daily plan
-    const countableModes = new Set(['FREEFORM', 'GENERATE_MEAL', 'DAILY_PLAN']);
+    // Count "chat submissions" (anything that isn't an analysis/vision mode).
+    // This prevents bypasses if the client sends a new/unexpected mode.
     const modeKey = String(mode || 'freeform').toUpperCase();
+    const nonChatModes = new Set(['ANALYZE_FOOD', 'ANALYZE_FOOD_BATCH', 'ANALYZE_MEAL', 'MENU_SCAN']);
 
-    if (countableModes.has(modeKey)) {
+    if (!nonChatModes.has(modeKey)) {
       const dayKey = computeLocalDayKey({ clientLocalDate });
-      const limit = dailyChatLimitForTier(tier);
+      const chatLimit = dailyChatLimitForTier(tier);
+      const totalLimit = dailyTotalLimitForTier(tier);
       const usageRef = db.collection('users').doc(uid).collection('meta').doc('usageDaily').collection('days').doc(dayKey);
 
       try {
         await db.runTransaction(async (tx) => {
           const snap = await tx.get(usageRef);
-          const used = snap.exists ? Number(snap.data()?.chatCount || 0) : 0;
-          if (used >= limit) {
+          const usedChat = snap.exists ? Number(snap.data()?.chatCount || 0) : 0;
+          const usedTotal = snap.exists ? Number(snap.data()?.totalCount || 0) : 0;
+          if (usedTotal >= totalLimit) {
+            const err = new Error('DAILY_TOTAL_LIMIT_REACHED');
+            err.code = 'LIMIT_TOTAL';
+            err.used = usedTotal;
+            err.limit = totalLimit;
+            err.tier = tier;
+            err.dayKey = dayKey;
+            throw err;
+          }
+          if (usedChat >= chatLimit) {
             const msg =
               tier === 'FREE'
                 ? 'DAILY_LIMIT_REACHED_FREE'
@@ -386,8 +423,8 @@ functions.http('checkin', async (req, res) => {
                   : 'DAILY_LIMIT_REACHED_PRO';
             const err = new Error(msg);
             err.code = 'LIMIT';
-            err.used = used;
-            err.limit = limit;
+            err.used = usedChat;
+            err.limit = chatLimit;
             err.tier = tier;
             err.dayKey = dayKey;
             throw err;
@@ -395,7 +432,8 @@ functions.http('checkin', async (req, res) => {
           tx.set(
             usageRef,
             {
-              chatCount: used + 1,
+              chatCount: usedChat + 1,
+              totalCount: usedTotal + 1,
               tier,
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
             },
@@ -403,12 +441,12 @@ functions.http('checkin', async (req, res) => {
           );
         });
       } catch (e) {
-        if (e?.code === 'LIMIT') {
+        if (e?.code === 'LIMIT' || e?.code === 'LIMIT_TOTAL') {
           return res.status(429).json({
             text: 'DAILY_LIMIT_REACHED',
             tier: String(e?.tier || tier),
             used: Number.isFinite(Number(e?.used)) ? Number(e.used) : null,
-            limit: Number.isFinite(Number(e?.limit)) ? Number(e.limit) : limit,
+            limit: Number.isFinite(Number(e?.limit)) ? Number(e.limit) : (e?.code === 'LIMIT_TOTAL' ? totalLimit : chatLimit),
             dayKey: String(e?.dayKey || dayKey)
           });
         }
@@ -525,16 +563,55 @@ Your job:
    - If NUTRITION FACTS photo is present and readable: use it.
    - If INGREDIENTS photo is present and readable: use it.
    - If photos are missing/unreadable OR text-only: you must ESTIMATE typical values.
+   Calories and macros are tricky because portion matters. Do this:
+   - First classify the photo into ONE:
+     - portionKind = "PACKAGED" for a packaged food (bag/box/bottle/can) where nutrition facts are likely relevant
+     - portionKind = "PLATED" for a plate/bowl/home-cooked meal where we want calories for the entire pictured food
+     - portionKind = "UNKNOWN" if you truly can't tell
+   - For PACKAGED:
+     - If nutrition facts are readable, extract caloriesPerServing and servingsPerContainer.
+     - Also extract servingSizeText (examples: "3 cookies (34g)" or "2 Tbsp (32g)").
+     - If not readable, estimate caloriesPerServing and set servingsPerContainer=null.
+     - If not readable, set servingSizeText="" (or a best-guess like "1 serving" if obvious).
+     - Set caloriesTotal = caloriesPerServing (default assumption: 1 serving).
+     - Set caloriesLow/caloriesHigh as a reasonable range for ONE serving (or null if no clue).
+     - IMPORTANT: estimatedProteinG/Carbs/Fat MUST be for ONE serving (same basis as caloriesPerServing).
+     - If you can estimate the whole-package total, DO NOT put it in caloriesTotal; the app will compute it from servingsPerContainer.
+   - For PLATED:
+     - Set caloriesTotal as your best estimate for the whole pictured plate/bowl.
+     - Set caloriesLow/caloriesHigh as a reasonable range for the whole plate.
+     - Set caloriesPerServing=null and servingsPerContainer=null.
+     - Set servingSizeText="1 plate" (or "1 bowl") if appropriate; otherwise "".
+     - IMPORTANT: estimatedProteinG/Carbs/Fat MUST be for the whole pictured plate (same basis as caloriesTotal).
    Return:
-     - estimatedCalories (number|null)
+     - estimatedCalories (number|null)  // keep for backward compatibility; set this equal to caloriesTotal
      - estimatedProteinG (number|null)
      - estimatedCarbsG (number|null)
      - estimatedFatG (number|null)
      - ingredientsText (string; "" if truly unknown)
+     - portionKind ("PACKAGED"|"PLATED"|"UNKNOWN")
+     - servingSizeText (string)
+     - caloriesPerServing (number|null)
+     - servingsPerContainer (number|null) // can be fractional (e.g. 2.5)
+     - caloriesTotal (number|null)        // calories for default interpretation (1 serving for packaged; full plate for plated)
+     - caloriesLow (number|null)          // range low for same basis as caloriesTotal
+     - caloriesHigh (number|null)         // range high for same basis as caloriesTotal
    It's OK to return null for numeric fields if you have no clue.
 7) Summary + concerns:
    - summary: 2–4 short sentences explaining what it is and why the ratings make sense.
    - concerns: one string like "high sugar; seed oils; additives" or "".
+   - Do NOT use shorthand like "P/C/F". If you mention macros, spell out "protein", "carbohydrates", and "fat".
+
+8) Categorize the item for the user's list:
+   Return suggestedCategory as ONE of:
+   - "INGREDIENT" = likely used in cooking/recipes (canned tomatoes, evaporated milk, frozen spinach, spices, oils, sauces used as ingredients)
+   - "SNACK" = likely eaten by itself (chips, candy, cookies, soda, protein bar, ice cream pint, jerky, yogurt cup)
+   - "MEAL" = ready-to-eat or complete meal (frozen dinner, prepared entrée, meal kit bowl)
+   Rules:
+   - If it is a single-ingredient food or cooking staple (even if branded), default to INGREDIENT.
+   - If it is clearly a branded snack food meant to eat straight, SNACK.
+   - If it is clearly a full meal, MEAL.
+   - If unsure between INGREDIENT vs SNACK, prefer INGREDIENT.
 
 IMPORTANT about "accepted":
 - accepted = TRUE for ANYTHING clearly EDIBLE food/drink/meal (even unhealthy).
@@ -556,7 +633,15 @@ Return ONE JSON object ONLY with EXACT keys:
   "estimatedProteinG": number|null,
   "estimatedCarbsG": number|null,
   "estimatedFatG": number|null,
-  "ingredientsText": string
+  "ingredientsText": string,
+  "portionKind": string,
+  "servingSizeText": string,
+  "caloriesPerServing": number|null,
+  "servingsPerContainer": number|null,
+  "caloriesTotal": number|null,
+  "caloriesLow": number|null,
+  "caloriesHigh": number|null,
+  "suggestedCategory": string
 }
 
 No extra keys. No markdown. No text outside JSON.
@@ -614,7 +699,15 @@ No extra keys. No markdown. No text outside JSON.
             estimatedProteinG: null,
             estimatedCarbsG: null,
             estimatedFatG: null,
-            ingredientsText: ''
+            ingredientsText: '',
+            portionKind: 'UNKNOWN',
+            servingSizeText: '',
+            caloriesPerServing: null,
+            servingsPerContainer: null,
+            caloriesTotal: null,
+            caloriesLow: null,
+            caloriesHigh: null,
+            suggestedCategory: 'INGREDIENT'
           })
         });
       }
@@ -658,6 +751,37 @@ No extra keys. No markdown. No text outside JSON.
           : asNullableInt(parsed.estimatedFatG);
 
         if (typeof parsed.ingredientsText !== 'string') parsed.ingredientsText = '';
+
+        // Calories metadata (new; optional)
+        const pk = String(parsed.portionKind || '').trim().toUpperCase();
+        parsed.portionKind = (pk === 'PACKAGED' || pk === 'PLATED' || pk === 'UNKNOWN') ? pk : 'UNKNOWN';
+
+        if (typeof parsed.servingSizeText !== 'string') parsed.servingSizeText = '';
+
+        parsed.caloriesPerServing = (parsed.caloriesPerServing === null || parsed.caloriesPerServing === undefined)
+          ? null
+          : asNullableInt(parsed.caloriesPerServing);
+        parsed.servingsPerContainer = (parsed.servingsPerContainer === null || parsed.servingsPerContainer === undefined)
+          ? null
+          : asNullableNumber(parsed.servingsPerContainer, { maxDecimals: 2 });
+        parsed.caloriesTotal = (parsed.caloriesTotal === null || parsed.caloriesTotal === undefined)
+          ? null
+          : asNullableInt(parsed.caloriesTotal);
+        parsed.caloriesLow = (parsed.caloriesLow === null || parsed.caloriesLow === undefined)
+          ? null
+          : asNullableInt(parsed.caloriesLow);
+        parsed.caloriesHigh = (parsed.caloriesHigh === null || parsed.caloriesHigh === undefined)
+          ? null
+          : asNullableInt(parsed.caloriesHigh);
+
+        // Backward compatibility: prefer caloriesTotal as the meaning of estimatedCalories.
+        if (parsed.caloriesTotal !== null && parsed.caloriesTotal !== undefined) {
+          parsed.estimatedCalories = parsed.caloriesTotal;
+        }
+
+        // Suggested list category (new; optional)
+        const sc = String(parsed.suggestedCategory || '').trim().toUpperCase();
+        parsed.suggestedCategory = (sc === 'INGREDIENT' || sc === 'SNACK' || sc === 'MEAL') ? sc : 'INGREDIENT';
       } catch (e) {
         console.error('Failed to parse analyze_food JSON', e, contentText);
         parsed = {
@@ -677,7 +801,15 @@ No extra keys. No markdown. No text outside JSON.
           estimatedProteinG: null,
           estimatedCarbsG: null,
           estimatedFatG: null,
-          ingredientsText: ''
+          ingredientsText: '',
+          portionKind: 'UNKNOWN',
+          servingSizeText: '',
+          caloriesPerServing: null,
+          servingsPerContainer: null,
+          caloriesTotal: null,
+          caloriesLow: null,
+          caloriesHigh: null,
+          suggestedCategory: 'INGREDIENT'
         };
       }
 
@@ -1379,6 +1511,11 @@ Notes / swaps (only using my list): <short>
       console.warn('caloriesToday read failed', e?.message || e);
     }
 
+    const knownFoodsLine = (() => {
+      const s = String(safeInventorySummary || '').trim();
+      return s ? `Known foods/inventory (from user's saved Foods list): ${s}.` : "Known foods/inventory (from user's saved Foods list): EMPTY.";
+    })();
+
     const contextLines = [
       "You are a short, casual, varied diet assistant inside a diet-management app.",
       `Diet type: ${dietType || "unknown"}.`,
@@ -1393,7 +1530,7 @@ Notes / swaps (only using my list): <short>
       `Recent hunger + signals: ${hungerSummary || "unknown"}.`,
       `Weight trend delta: ${weightTrend ?? "unknown"}.`,
       `Minutes since meal (legacy): ${minutesSinceMeal ?? "unknown"}.`,
-      `Known foods/inventory: ${safeInventorySummary || "unknown"}.`,
+      knownFoodsLine,
       `Mode: ${mode || "freeform"}.`,
       `Tone hints: ${tone || "short, casual, varied, human, not templated"}.`
     ];
@@ -1420,6 +1557,14 @@ Conversation:
 - If the message isn’t about food/diet/this app, just answer normally (don’t force diet talk).
 - If you answer a non-food question, do NOT append a “food-related questions…” redirect. Just answer the question.
 - Keep continuity; interpret “it/that/this” as the most recent food/topic unless unclear.
+
+Foods list visibility / access (IMPORTANT):
+- You DO have access to the user's saved Foods list via the context line that begins:
+  "Known foods/inventory (from user's saved Foods list): ..."
+- Never say you "can't see" or "don't have access" to their list.
+- If the user asks whether you can see/access their list, answer YES and offer to summarize it.
+- If the user asks to see/list what's in their list, summarize what you see from the Known foods/inventory context.
+- If the context says EMPTY, say their list looks empty and suggest adding foods.
 
 Daily calories:
 - If the user is telling you what they ate/drank today, estimate calories and update their daily total.

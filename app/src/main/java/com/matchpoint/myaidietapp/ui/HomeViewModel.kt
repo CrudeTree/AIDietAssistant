@@ -3,11 +3,16 @@ package com.matchpoint.myaidietapp.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import android.util.Log
+import com.google.firebase.FirebaseApp
+import com.google.firebase.appcheck.FirebaseAppCheck
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException
 import com.google.firebase.auth.FirebaseAuthRecentLoginRequiredException
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.matchpoint.myaidietapp.data.MessagesRepository
 import com.matchpoint.myaidietapp.data.RecipesRepository
+import com.matchpoint.myaidietapp.data.RecipeQnaRepository
 import com.matchpoint.myaidietapp.data.ScheduledMealsRepository
 import com.matchpoint.myaidietapp.data.StorageRepository
 import com.matchpoint.myaidietapp.data.AuthRepository
@@ -22,6 +27,7 @@ import com.matchpoint.myaidietapp.model.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.tasks.await
 import retrofit2.HttpException
 import kotlin.random.Random
@@ -40,11 +46,21 @@ data class UiState(
     val savedRecipes: List<SavedRecipe> = emptyList(),
     val chatSessions: List<ChatSession> = emptyList(),
     val activeChatId: String = "default",
+    val recipeQaByRecipeId: Map<String, List<MessageEntry>> = emptyMap(),
+    val recipeQaBusyRecipeId: String? = null,
     val introPending: Boolean = false,
     val error: String? = null,
     val isProcessing: Boolean = false,
     val pendingGrocery: PendingGrocery? = null,
     val planGateNotice: String? = null,
+    /**
+     * Client-side override for subscription tier, sourced from RevenueCat (when available).
+     *
+     * We do this because Firestore rules treat `subscriptionTier` as server-managed and the client
+     * often sees a stale FREE tier immediately after purchase. Using this override prevents limits
+     * like "10 food items" from getting stuck after upgrading.
+     */
+    val effectiveTierOverride: SubscriptionTier? = null,
     val dailyPlanMeals: List<DailyPlanUiMeal> = emptyList(),
     val dailyPlanTotalCount: Int = 0,
     val dailyPlanDayId: String? = null
@@ -55,7 +71,14 @@ data class UiState(
 data class PendingGrocery(
     val id: String,
     val aiMessage: String,
-    val item: FoodItem
+    val item: FoodItem,
+    // Optional calories metadata for UI (AI Evaluate Food).
+    val portionKind: String? = null, // "PACKAGED" | "PLATED" | "UNKNOWN"
+    val caloriesPerServing: Int? = null,
+    val servingsPerContainer: Double? = null,
+    val caloriesTotal: Int? = null,
+    val caloriesLow: Int? = null,
+    val caloriesHigh: Int? = null
 )
 
 data class DailyPlanUiMeal(
@@ -101,6 +124,129 @@ private fun buildDailyLimitGateNotice(e: HttpException): String {
     }
 }
 
+private fun filterUserVisibleChats(sessions: List<ChatSession>): List<ChatSession> {
+    // Hide per-recipe Q&A threads from the normal chat history UI.
+    return sessions.filterNot { it.id.trim().startsWith("recipe:", ignoreCase = true) }
+}
+
+private fun parseRemoveFromListCommand(userMessage: String): String? {
+    val s = userMessage.trim()
+    if (s.isBlank()) return null
+
+    // We want this to feel natural-language, not "exact command" based.
+    // Examples we should catch:
+    // - "Remove bacon"
+    // - "Can you remove Bacon from my list?"
+    // - "I think I want to remove bacon from the list"
+    // - "Let's go ahead and remove greek yogurt from my ingredients"
+    // - "Please delete cottage cheese"
+    val verb = Regex("""\b(remove|delete)\b""", RegexOption.IGNORE_CASE)
+    val m = verb.find(s) ?: return null
+
+    var after = s.substring(m.range.last + 1).trim()
+    if (after.isBlank()) return null
+
+    // Cut off trailing "from ..." / "off ..." phrases so we isolate the item name.
+    val cutoff = listOf(" from ", " off ", " out of ", " in ")
+        .mapNotNull { tok ->
+            val idx = after.lowercase().indexOf(tok)
+            if (idx >= 0) idx else null
+        }
+        .minOrNull()
+    if (cutoff != null) after = after.take(cutoff).trim()
+
+    // Strip some common filler words at the start of the extracted phrase.
+    after = after
+        .replace(Regex("""^(please|just|kindly|go ahead and|ahead and|the)\s+""", RegexOption.IGNORE_CASE), "")
+        .trim()
+
+    // Remove surrounding quotes if present.
+    after = after.trim().trim('"', '\'').trim()
+
+    // Trim punctuation at the end.
+    val cleaned = after
+        .trim()
+        .trimEnd('.', '!', '?', ',', ';', ':')
+        .trim()
+        .takeIf { it.isNotBlank() }
+        ?: return null
+
+    // Avoid accidentally treating very long user sentences as a "name".
+    if (cleaned.length > 80) return null
+
+    // Guard against ultra-generic removes like "remove it" / "remove that".
+    val generic = setOf("it", "that", "this", "them", "those")
+    if (generic.contains(cleaned.lowercase())) return null
+
+    return cleaned
+}
+
+private data class AddToListIntent(
+    val items: List<String>,
+    val category: String // "INGREDIENT" | "SNACK" | "MEAL"
+)
+
+private fun parseAddToListIntent(userMessage: String): AddToListIntent? {
+    val raw = userMessage.trim()
+    if (raw.isBlank()) return null
+    val t = raw.lowercase()
+
+    val verb = Regex("""\b(add|save|put|include)\b""", RegexOption.IGNORE_CASE)
+    val m = verb.find(t) ?: return null
+
+    val hasListTarget = Regex("""\b(my\s+)?(list|food\s*list|foods|ingredients?|snacks?|meals?)\b""")
+        .containsMatchIn(t)
+
+    // Avoid false positives like recipe instructions: "add salt", "add onions to the pan".
+    // If they don't mention a list/foods target, only accept very short "add X" messages.
+    if (!hasListTarget && raw.length > 40) return null
+
+    // Determine target category (default INGREDIENT if unspecified).
+    val category = when {
+        Regex("""\bingredients?\b""").containsMatchIn(t) -> "INGREDIENT"
+        Regex("""\bsnacks?\b""").containsMatchIn(t) -> "SNACK"
+        Regex("""\bmeals?\b""").containsMatchIn(t) -> "MEAL"
+        else -> "INGREDIENT"
+    }
+
+    // Extract the "thing(s)" after the add-verb.
+    var after = raw.substring(m.range.last + 1).trim()
+    if (after.isBlank()) return null
+
+    // Cut off any trailing "to my list/foods/ingredients..." clause so we isolate item names.
+    val cutRe = Regex("""\b(to|into|in)\b\s+(my\s+)?(list|food\s*list|foods|ingredients?|snacks?|meals?)\b""", RegexOption.IGNORE_CASE)
+    val cut = cutRe.find(after)
+    if (cut != null) {
+        after = after.substring(0, cut.range.first).trim()
+    }
+
+    // Strip filler at start.
+    after = after
+        .replace(Regex("""^(please|just|kindly|go ahead and|ahead and|the)\s+""", RegexOption.IGNORE_CASE), "")
+        .trim()
+
+    // Normalize separators: commas and "and"/"&".
+    val normalized = after
+        .replace(" & ", ", ")
+        .replace(Regex("""\s+\band\b\s+""", RegexOption.IGNORE_CASE), ", ")
+        .trim()
+
+    val parts = normalized
+        .split(",")
+        .map { it.trim().trim('"', '\'').trim().trimEnd('.', '!', '?', ';', ':') }
+        .map { it.replace(Regex("""\s+"""), " ").trim() }
+        .filter { it.isNotBlank() }
+        .take(12)
+
+    if (parts.isEmpty()) return null
+
+    val generic = setOf("it", "that", "this", "them", "those", "something", "anything")
+    val items = parts.filterNot { generic.contains(it.lowercase()) }
+    if (items.isEmpty()) return null
+
+    return AddToListIntent(items = items, category = category)
+}
+
 class HomeViewModel(
     private val userId: String,
     private val db: FirebaseFirestore = FirebaseFirestore.getInstance(),
@@ -137,6 +283,16 @@ class HomeViewModel(
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState
 
+    fun setEffectiveTierOverride(tier: SubscriptionTier?) {
+        val cur = _uiState.value.effectiveTierOverride
+        if (cur == tier) return
+        _uiState.value = _uiState.value.copy(effectiveTierOverride = tier)
+    }
+
+    private fun tierForLimits(profile: UserProfile): SubscriptionTier {
+        return _uiState.value.effectiveTierOverride ?: profile.subscriptionTier
+    }
+
     private val dailyPlanner = DailyPlanner(zoneId)
     private val checkInGenerator = CheckInGenerator()
 
@@ -144,6 +300,7 @@ class HomeViewModel(
     private val scheduleRepo by lazy { ScheduledMealsRepository(db, userId) }
     private val messagesRepo by lazy { MessagesRepository(db, userId) }
     private val recipesRepo by lazy { RecipesRepository(db, userId) }
+    private val recipeQnaRepo by lazy { RecipeQnaRepository(db, userId) }
     private val calorieRepo by lazy { com.matchpoint.myaidietapp.data.CalorieRepository(db, userId) }
     private val storageRepo by lazy { StorageRepository() }
     private val proxyRepo by lazy { OpenAiProxyRepository() }
@@ -156,11 +313,44 @@ class HomeViewModel(
     }
 
     private suspend fun bootstrap() {
-        try {
+        // App Check can briefly deny Firestore at cold start until the token is available.
+        // Retry a few times so we don't get stuck on a permanent "Loading your profile…" screen.
+        val maxAttempts = 8
+        val baseDelayMs = 450L
+        val firebaseProjectId = runCatching { FirebaseApp.getInstance().options.projectId }.getOrNull()
+        val authUid = authRepo.currentUid()
+        Log.w("Bootstrap", "bootstrap() start uid=$authUid projectId=$firebaseProjectId")
+        for (attempt in 1..maxAttempts) {
+            var stage = "start"
+            try {
+            stage = "auth_token"
+            val authDiag = runCatching {
+                val u = FirebaseAuth.getInstance().currentUser
+                if (u == null) {
+                    "null"
+                } else {
+                    val tok = u.getIdToken(false).await()
+                    "ok(uid=${u.uid}, tokenLen=${tok.token?.length ?: 0})"
+                }
+            }.getOrElse { e ->
+                "fail(${e::class.java.simpleName}: ${e.message})"
+            }
+
+            // Fetch App Check token early to make the failure mode obvious in logs and UI.
+            stage = "app_check"
+            val appCheckDiag = runCatching {
+                val tok = FirebaseAppCheck.getInstance().getAppCheckToken(false).await()
+                "ok(len=${tok.token.length})"
+            }.getOrElse { e ->
+                "fail(${e::class.java.simpleName}: ${e.message})"
+            }
+            Log.w("Bootstrap", "auth=$authDiag appCheck=$appCheckDiag attempt=$attempt/$maxAttempts")
+
             val authEmail = authRepo.currentEmail()?.trim()?.ifBlank { null }
             // If the user doc doesn't exist yet (new account), auto-create defaults.
             // NOTE: tutorial progress writes can create the user doc early with only tutorial fields.
             // In that case, we still treat the profile as "not initialized" and write full defaults once.
+            stage = "users_doc_get"
             val userDocRef = db.collection("users").document(userId)
             val snap = userDocRef.get().await()
             val loaded = snap.toObject(UserProfile::class.java)
@@ -182,7 +372,11 @@ class HomeViewModel(
                     eatingWindowStartMinutes = base.eatingWindowStartMinutes,
                     eatingWindowEndMinutes = base.eatingWindowEndMinutes
                 )
-                userRepo.saveUserProfile(created)
+                stage = "users_doc_save"
+                // Do not block app startup on a profile write. If rules/App Check are temporarily misconfigured,
+                // we can still proceed with an in-memory default profile and retry later.
+                runCatching { userRepo.saveUserProfile(created) }
+                    .onFailure { e -> Log.w("Bootstrap", "Profile save failed (continuing without blocking).", e) }
                 created
             } else {
                 loaded
@@ -190,11 +384,13 @@ class HomeViewModel(
 
             // Backfill email for existing users (helps identify accounts in Firestore console).
             if (!authEmail.isNullOrBlank() && (profile.email.isNullOrBlank() || profile._email.isNullOrBlank())) {
+                stage = "users_doc_backfill_email"
                 runCatching { userRepo.saveUserProfile(profile.copy(email = authEmail, _email = authEmail)) }
             }
 
             val todayDate = LocalDate.now(zoneId)
             val todayId = todayDate.toString()
+            stage = "schedule_get_or_create"
             val schedule = scheduleRepo.getDaySchedule(todayId)
                 ?: dailyPlanner.planForDay(todayDate, profile).also {
                     scheduleRepo.saveDaySchedule(it)
@@ -205,31 +401,27 @@ class HomeViewModel(
 
             // Always start on a fresh draft chat on app startup so users don't see the previous conversation by default.
             // This draft is not persisted (so it won't show up as "New chat" in history).
+            stage = "messages_start_draft"
             messagesRepo.startDraftChat()
 
-            // One-time-only friendly intro: show it ONLY the very first time the user enters the app.
-            // Do not persist it to chat history.
-            val (effectiveProfile, initialMessages, introPending) = if (!profile.hasSeenWelcomeIntro) {
-                val welcomeMessage = MessageEntry(
-                    id = java.util.UUID.randomUUID().toString(),
-                    sender = MessageSender.AI,
-                    text = "AI Diet Assistant online. Add foods to your list and I’ll help you manage your diet, generate recipes, and scan groceries/menus."
-                )
-                val introMessage = MessageEntry(
-                    id = java.util.UUID.randomUUID().toString(),
-                    sender = MessageSender.AI,
-                    text = introText(profile)
-                )
+            // Do not inject any automatic welcome/chat messages.
+            // Still mark the profile flag once so we don't repeatedly attempt "first-run" behavior.
+            var effectiveProfile: UserProfile = profile
+            val initialMessages: List<MessageEntry> = emptyList()
+            val introPending: Boolean = false
+            if (!profile.hasSeenWelcomeIntro) {
                 val updated = profile.copy(hasSeenWelcomeIntro = true)
+                stage = "users_doc_mark_seen_intro"
                 runCatching { userRepo.saveUserProfile(updated) }
-                Triple(updated, listOf(welcomeMessage, introMessage), true)
-            } else {
-                Triple(profile, emptyList(), false)
+                effectiveProfile = updated
             }
 
-            val chatSessions = runCatching { messagesRepo.listChats() }.getOrElse { emptyList() }
+            stage = "list_chats"
+            val chatSessions = runCatching { filterUserVisibleChats(messagesRepo.listChats()) }.getOrElse { emptyList() }
             val activeChatId = messagesRepo.getActiveChatId()
+            stage = "messages_get_log"
             val messages = initialMessages.ifEmpty { messagesRepo.getMessageLog().log }
+            stage = "recipes_list"
             val savedRecipes = runCatching { recipesRepo.listRecipesNewestFirst() }.getOrElse { emptyList() }
 
             _uiState.value = UiState(
@@ -242,9 +434,49 @@ class HomeViewModel(
                 activeChatId = activeChatId,
                 introPending = introPending
             )
+            return
+            } catch (e: Exception) {
+                val fs = e as? FirebaseFirestoreException
+                val isPerm = fs?.code == FirebaseFirestoreException.Code.PERMISSION_DENIED
+                val isUnavailable = fs?.code == FirebaseFirestoreException.Code.UNAVAILABLE
 
-        } catch (e: Exception) {
-            _uiState.value = _uiState.value.copy(isLoading = false, error = e.message)
+                Log.w("Bootstrap", "bootstrap() failed attempt=$attempt/$maxAttempts uid=$authUid projectId=$firebaseProjectId err=${e::class.java.name}: ${e.message}", e)
+
+                if (attempt < maxAttempts && (isPerm || isUnavailable)) {
+                    // Keep loading state; clear stale error.
+                    _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+                    delay(baseDelayMs * attempt)
+                    continue
+                }
+                val detail = buildString {
+                    append("Startup failed.\n")
+                    append("projectId=")
+                    append(firebaseProjectId ?: "null")
+                    append("\n")
+                    append("step=")
+                    append(stage)
+                    append("\n")
+                    append("uid=")
+                    append(authUid ?: "null")
+                    append("\n")
+                    if (fs != null) {
+                        append("firestore=")
+                        append(fs.code)
+                        append("\n")
+                    } else {
+                        append("error=")
+                        append(e::class.java.simpleName)
+                        append("\n")
+                    }
+                    append(e.message ?: "(no message)")
+                    if (isPerm) {
+                        append("\n\nIf this is a debug build, this is usually App Check.\n")
+                        append("Logcat: filter tag 'AppCheck' and whitelist the printed debug secret in Firebase App Check.")
+                    }
+                }
+                _uiState.value = _uiState.value.copy(isLoading = false, error = detail)
+                return
+            }
         }
     }
 
@@ -253,7 +485,7 @@ class HomeViewModel(
             try {
                 // Start a draft chat (does not appear in history until the user sends a message).
                 messagesRepo.startDraftChat()
-                val sessions = messagesRepo.listChats()
+                val sessions = filterUserVisibleChats(messagesRepo.listChats())
                 val log = messagesRepo.getMessageLog().log
                 _uiState.value = _uiState.value.copy(
                     chatSessions = sessions,
@@ -271,7 +503,7 @@ class HomeViewModel(
             try {
                 messagesRepo.setActiveChat(chatId)
                 val log = messagesRepo.getMessageLog().log
-                val sessions = messagesRepo.listChats()
+                val sessions = filterUserVisibleChats(messagesRepo.listChats())
                 _uiState.value = _uiState.value.copy(
                     chatSessions = sessions,
                     activeChatId = chatId,
@@ -295,7 +527,7 @@ class HomeViewModel(
                     messagesRepo.createNewChat()
                 }
 
-                val sessions = messagesRepo.listChats()
+                val sessions = filterUserVisibleChats(messagesRepo.listChats())
                 val log = messagesRepo.getMessageLog().log
                 _uiState.value = _uiState.value.copy(
                     chatSessions = sessions,
@@ -434,11 +666,12 @@ class HomeViewModel(
     }
 
     private fun checkFoodListLimitOrPrompt(profile: UserProfile, addingCount: Int = 1): Boolean {
-        val limit = foodListLimitFor(profile.subscriptionTier)
+        val tier = tierForLimits(profile)
+        val limit = foodListLimitFor(tier)
         val current = profile.foodItems.size
         if (current + addingCount <= limit) return true
 
-        val upsell = when (profile.subscriptionTier) {
+        val upsell = when (tier) {
             SubscriptionTier.FREE ->
                 "Upgrade to Basic for \$9.99/month (\$99.99/year) for up to 50 items, or Premium for \$19.99/month (\$199.99/year) for up to 1000 items."
             SubscriptionTier.REGULAR ->
@@ -462,10 +695,11 @@ class HomeViewModel(
     }
 
     private fun checkRecipeListLimitOrPrompt(profile: UserProfile, currentSaved: Int, addingCount: Int = 1): Boolean {
-        val limit = recipeLimitFor(profile.subscriptionTier)
+        val tier = tierForLimits(profile)
+        val limit = recipeLimitFor(tier)
         if (currentSaved + addingCount <= limit) return true
 
-        val upsell = when (profile.subscriptionTier) {
+        val upsell = when (tier) {
             SubscriptionTier.FREE ->
                 "Upgrade to Basic for \$9.99/month (\$99.99/year) for up to 15 saved recipes, or Premium for \$19.99/month (\$199.99/year) for up to 500 saved recipes."
             SubscriptionTier.REGULAR ->
@@ -539,25 +773,12 @@ class HomeViewModel(
                     )
                 }
 
-                val welcomeMessage = MessageEntry(
-                    id = UUID.randomUUID().toString(),
-                    sender = MessageSender.AI,
-                    text = "AI Diet Assistant online. Add foods to your list and I’ll help you manage your diet, generate recipes, and scan groceries/menus."
-                )
-                val introMessage = MessageEntry(
-                    id = UUID.randomUUID().toString(),
-                    sender = MessageSender.AI,
-                    text = introText(profile)
-                )
-                messagesRepo.appendMessage(welcomeMessage)
-                messagesRepo.appendMessage(introMessage)
-
                 _uiState.value = UiState(
                     isLoading = false,
                     profile = profile.copy(nextMealAtMillis = firstMealTime, hasSeenWelcomeIntro = true),
                     todaySchedule = schedule,
-                    messages = listOf(welcomeMessage, introMessage),
-                    introPending = true
+                    messages = emptyList(),
+                    introPending = false
                 )
 
                 // Persist one-time intro flag so it never shows again on later launches.
@@ -693,6 +914,98 @@ class HomeViewModel(
                     append(dietFitRating)
                     append("/10. ")
                     append(analysis.summary)
+                    val kind = analysis.portionKind?.trim()?.uppercase()
+                    val servingText = analysis.servingSizeText?.trim().orEmpty()
+                    val caloriesPerServing = analysis.caloriesPerServing
+                    val servingsPerContainer = analysis.servingsPerContainer
+                    val cals = analysis.caloriesTotal ?: analysis.estimatedCalories
+                    val low = analysis.caloriesLow
+                    val high = analysis.caloriesHigh
+
+                    if (kind == "PACKAGED") {
+                        if (caloriesPerServing != null) {
+                            append(" Calories per serving: ~")
+                            append(caloriesPerServing)
+                            if (!servingText.isNullOrBlank()) {
+                                append(" (")
+                                append(servingText)
+                                append(")")
+                            }
+                            append(".")
+                        } else if (cals != null) {
+                            append(" Estimated calories per serving: ~")
+                            append(cals)
+                            append(".")
+                        }
+                        if (servingsPerContainer != null) {
+                            append(" Servings per container: ")
+                            append(servingsPerContainer)
+                            append(".")
+                            if (caloriesPerServing != null) {
+                                val whole = kotlin.math.round(caloriesPerServing * servingsPerContainer).toInt()
+                                append(" Whole package: ~")
+                                append(whole)
+                                append(" calories.")
+                            }
+                        }
+                    } else if (kind == "PLATED") {
+                        if (cals != null) {
+                            append(" Estimated calories for the full plate: ~")
+                            append(cals)
+                            if (low != null && high != null && low > 0 && high > 0) {
+                                append(" (")
+                                append(low)
+                                append("–")
+                                append(high)
+                                append(")")
+                            }
+                            append(".")
+                        }
+                        if (servingText.isNotBlank()) {
+                            append(" Serving size: ")
+                            append(servingText)
+                            append(".")
+                        } else {
+                            append(" Serving size: 1 plate.")
+                        }
+                    } else {
+                        if (cals != null) {
+                            append(" Estimated calories: ~")
+                            append(cals)
+                            if (low != null && high != null && low > 0 && high > 0) {
+                                append(" (")
+                                append(low)
+                                append("–")
+                                append(high)
+                                append(")")
+                            }
+                            append(".")
+                        }
+                    }
+
+                    val p = analysis.estimatedProteinG
+                    val c = analysis.estimatedCarbsG
+                    val f = analysis.estimatedFatG
+                    if (p != null || c != null || f != null) {
+                        append(" Estimated macros")
+                        if (kind == "PACKAGED") append(" (per serving)") else if (kind == "PLATED") append(" (full plate)")
+                        append(":")
+                        if (p != null) {
+                            append(" Protein: ")
+                            append(p)
+                            append("g.")
+                        }
+                        if (c != null) {
+                            append(" Carbohydrates: ")
+                            append(c)
+                            append("g.")
+                        }
+                        if (f != null) {
+                            append(" Fat: ")
+                            append(f)
+                            append("g.")
+                        }
+                    }
                     if (analysis.concerns.isNotBlank()) {
                         append(" Concerns: ")
                         append(analysis.concerns)
@@ -763,11 +1076,15 @@ class HomeViewModel(
                         labelUrl = labelUrl,
                         nutritionFactsUrl = nutritionFactsUrl,
                         notes = analysis.summary,
-                        estimatedCalories = analysis.estimatedCalories,
+                        estimatedCalories = analysis.caloriesTotal ?: analysis.estimatedCalories,
                         estimatedProteinG = analysis.estimatedProteinG,
                         estimatedCarbsG = analysis.estimatedCarbsG,
                         estimatedFatG = analysis.estimatedFatG,
                         ingredientsText = analysis.ingredientsText,
+                        portionKind = analysis.portionKind,
+                        servingSizeText = analysis.servingSizeText,
+                        caloriesPerServing = analysis.caloriesPerServing,
+                        servingsPerContainer = analysis.servingsPerContainer,
                         rating = healthRating,
                         dietFitRating = dietFitRating,
                         dietRatings = dietRatings,
@@ -842,10 +1159,44 @@ class HomeViewModel(
                     return@launch
                 }
 
+                // Enforce tier food-list limit here too (even if UI is bypassed).
+            val limit = foodListLimitFor(tierForLimits(current))
+                val existingKeys = current.foodItems.map { normalizeFoodNameKey(it.name) }.toSet()
+                val existingInBatch = deduped.filter { existingKeys.contains(normalizeFoodNameKey(it)) }
+                val newInBatch = deduped.filterNot { existingKeys.contains(normalizeFoodNameKey(it)) }
+                val remaining = (limit - current.foodItems.size).coerceAtLeast(0)
+
+                if (remaining <= 0 && newInBatch.isNotEmpty()) {
+                    checkFoodListLimitOrPrompt(current, addingCount = 1)
+                    return@launch
+                }
+
+                val trimmedNew = if (newInBatch.size > remaining) newInBatch.take(remaining) else newInBatch
+                if (trimmedNew.size < newInBatch.size) {
+                    // Prompt upgrade, but still allow adding what fits.
+                    checkFoodListLimitOrPrompt(current, addingCount = newInBatch.size)
+                }
+
+                val effectiveDeduped = (existingInBatch + trimmedNew)
+                    .distinctBy { normalizeFoodNameKey(it) }
+                if (effectiveDeduped.isEmpty()) return@launch
+
+                // Give the user immediate feedback (they'll see this on Home right away).
+                if (cats.any { it.equals("INGREDIENT", ignoreCase = true) }) {
+                    messagesRepo.appendMessage(
+                        MessageEntry(
+                            id = UUID.randomUUID().toString(),
+                            sender = MessageSender.AI,
+                            text = "Hmm… let me analyze these for you."
+                        )
+                    )
+                    _uiState.value = _uiState.value.copy(messages = messagesRepo.getMessageLog().log)
+                }
+
                 // Backend has a batch max; chunk requests to stay under it.
                 val CHUNK_SIZE = 25
                 val analyses = mutableListOf<com.matchpoint.myaidietapp.data.AnalyzeFoodResponse>()
-                val chunks = deduped.chunked(CHUNK_SIZE)
+                val chunks = effectiveDeduped.chunked(CHUNK_SIZE)
 
                 for (chunk in chunks) {
                     val batch = runCatching {
@@ -1017,6 +1368,15 @@ class HomeViewModel(
                     dailyPlanTotalCount = meals.size,
                     dailyPlanDayId = dayId
                 )
+
+                // Chat helper message: tell the user how to view the plan.
+                val notice = MessageEntry(
+                    id = UUID.randomUUID().toString(),
+                    sender = MessageSender.AI,
+                    text = "Your daily plan has been generated. Tap the carrot next to Daily Plan to view it."
+                )
+                messagesRepo.appendMessage(notice)
+                _uiState.value = _uiState.value.copy(messages = messagesRepo.getMessageLog().log)
             } catch (e: Exception) {
                 if (gateIfDailyLimit(e)) return@launch
                 val msg = when (e) {
@@ -1060,6 +1420,62 @@ class HomeViewModel(
         val foodLine = if (names.isNotEmpty()) "I see you have $names on your list." else "Start by adding a few foods to your list."
         val goalLine = profile.weightGoal?.takeIf { it > 0.0 }?.let { " Goal noted: ${formatWeight(it, profile.weightUnit)}." } ?: ""
         return "Hey ${profile.name.ifBlank { "there" }}. $foodLine$goalLine Want a recipe idea, a grocery opinion, or a menu recommendation?"
+    }
+
+    private fun shouldRouteToEvaluateFood(userMessage: String): Boolean {
+        val m = userMessage.trim().lowercase()
+        if (m.isBlank()) return false
+
+        // Only auto-route on *explicit* requests for the app to take a picture/photo.
+        // This avoids false positives like: "I'm looking at this picture... are pickles healthy?"
+        val explicitPhrases = listOf(
+            "can you take a picture",
+            "can you take a photo",
+            "can you take a pic",
+            "could you take a picture",
+            "could you take a photo",
+            "could you take a pic",
+            "take a picture for me",
+            "take a photo for me",
+            "take a pic for me"
+        )
+        return explicitPhrases.any { m.contains(it) }
+    }
+
+    private fun recipePhaseList(): String {
+        // Keep in sync with available `ic_phase_*` drawables.
+        return "PREP, WASH, PEEL, CHOP, GRATE, MEASURE, MIX, WHISK, MEDIUM_BOWL, MARINATE, PREHEAT, SEAR, SAUTE, SIMMER, BOIL, BAKE, POUR, DRAIN, SEASON, REDUCE_HEAT, SET_TIMER, SKILLET"
+    }
+
+    private fun shouldEncourageRecipeFormatting(userMessage: String): Boolean {
+        val m = userMessage.trim().lowercase()
+        if (m.isBlank()) return false
+
+        // Conservative: only trigger when the user explicitly asks for a recipe or to "make/cook" something.
+        val asksRecipe = Regex("\\brecipe\\b").containsMatchIn(m) ||
+            Regex("\\b(make|cook|create|generate)\\b").containsMatchIn(m) && Regex("\\b(dinner|lunch|breakfast|meal)\\b").containsMatchIn(m) ||
+            m.contains("how do i make") ||
+            m.contains("how to make")
+
+        return asksRecipe
+    }
+
+    private fun recipeFormattingRulesForAi(): String {
+        return buildString {
+            append("If you respond with a RECIPE, follow these formatting rules:\n")
+            append("- No emojis.\n")
+            append("- Start with a single title line as a Markdown heading, like:\n")
+            append("  # Creamy Bacon & Eggs\n")
+            append("- Do NOT write \"Title:\" anywhere.\n")
+            append("- Use Markdown section headings (##) to break it into sections (example: ## Ingredients, ## Prep, ## Cook, ## Serve).\n")
+            append("- You MAY insert a phase marker on its own line (example: {phase: PREP}).\n")
+            append("- Only use these phases: ")
+            append(recipePhaseList())
+            append(".\n")
+            append("- Rules for phase markers: max 4 total, never repeat the same phase, never put a phase marker inline mid-sentence.\n")
+            append("- Put the phase marker immediately after a section heading (except Ingredients).\n")
+            append("- Give step-by-step instructions with times/temps.\n")
+        }
     }
 
     private fun estimateWeightTrend(weights: List<WeightEntry>): Double {
@@ -1173,7 +1589,6 @@ class HomeViewModel(
     fun updateTutorialProgress(maxStepReached: Int, totalSteps: Int = 32) {
         val clamped = maxStepReached.coerceIn(0, totalSteps)
         if (lastTutorialProgressSent == clamped) return
-        lastTutorialProgressSent = clamped
 
         viewModelScope.launch {
             runCatching {
@@ -1182,10 +1597,13 @@ class HomeViewModel(
                     totalSteps = totalSteps,
                     progressText = "$clamped/$totalSteps"
                 )
-                val updated = userRepo.getUserProfile()
-                _uiState.value = _uiState.value.copy(profile = updated)
+                // Mark as sent only after a successful write so we can retry if App Check
+                // briefly denies early startup writes.
+                lastTutorialProgressSent = clamped
             }.onFailure { e ->
                 // Best-effort analytics: don't surface as a user-facing error.
+                // NOTE: We intentionally do NOT update lastTutorialProgressSent on failure,
+                // so the next step change can retry.
                 Log.w("HomeViewModel", "Failed to update tutorial progress", e)
             }
         }
@@ -1373,6 +1791,7 @@ class HomeViewModel(
     fun sendFreeformMessage(message: String) {
         if (message.isBlank()) return
         viewModelScope.launch {
+            var handedOffProcessingToBatch = false
             try {
                 _uiState.value = _uiState.value.copy(isProcessing = true)
                 val userEntry = MessageEntry(
@@ -1383,12 +1802,28 @@ class HomeViewModel(
                 messagesRepo.appendMessage(userEntry)
                 // Optimistic UI update: show the user's message immediately while the AI is thinking.
                 // Also refresh chat sessions so the "New chat" title becomes a topic title immediately.
-                val refreshedChats = runCatching { messagesRepo.listChats() }.getOrElse { _uiState.value.chatSessions }
+                val refreshedChats = runCatching { filterUserVisibleChats(messagesRepo.listChats()) }.getOrElse { _uiState.value.chatSessions }
                 _uiState.value = _uiState.value.copy(
                     messages = _uiState.value.messages + userEntry,
                     chatSessions = refreshedChats,
                     activeChatId = messagesRepo.getActiveChatId()
                 )
+
+                // If the user is asking to analyze something via a photo/camera in chat,
+                // direct them to the in-app "AI Evaluate Food" camera flow instead.
+                if (shouldRouteToEvaluateFood(message)) {
+                    val aiEntry = MessageEntry(
+                        id = UUID.randomUUID().toString(),
+                        sender = MessageSender.AI,
+                        text = "I can’t take pictures directly from chat. Tap the AI Evaluate Food button on the home screen to use your camera, then I’ll analyze it."
+                    )
+                    messagesRepo.appendMessage(aiEntry)
+                    _uiState.value = _uiState.value.copy(
+                        isProcessing = false,
+                        messages = _uiState.value.messages + aiEntry
+                    )
+                    return@launch
+                }
 
                 // Shortcut: user wants to "save these options" (e.g., a meal plan) — do it locally
                 // without consuming another AI request / daily quota.
@@ -1398,6 +1833,67 @@ class HomeViewModel(
                 }
 
                 val currentProfile = userRepo.getUserProfile()
+
+                // Local shortcut: add foods to list by natural language (no quota, always reliable).
+                val addIntent = parseAddToListIntent(message)
+                if (currentProfile != null && addIntent != null) {
+                    // IMPORTANT:
+                    // This must behave exactly like the "Add by text" flow:
+                    // it should analyze the foods (health/diet ratings, summary, macros, etc.)
+                    // before saving to the list. `addFoodItemsBatch()` does that.
+                    handedOffProcessingToBatch = true
+                    addFoodItemsBatch(addIntent.items, setOf(addIntent.category))
+                    // addFoodItemsBatch manages isProcessing + messages; do not call the AI.
+                    return@launch
+                }
+
+                // Local shortcut: remove foods by name from user's list (no quota, always accurate).
+                val removeName = parseRemoveFromListCommand(message)
+                if (currentProfile != null && removeName != null) {
+                    val targetKey = normalizeFoodNameKey(removeName)
+                    fun baseKey(n: String): String =
+                        normalizeFoodNameKey(n.substringBefore("(").trim())
+
+                    val candidates = currentProfile.foodItems
+                    val exact = candidates.filter { baseKey(it.name) == targetKey }
+                    val fallback = if (exact.isNotEmpty()) exact else candidates.filter {
+                        val nk = baseKey(it.name)
+                        nk == targetKey || nk.contains(targetKey) || targetKey.contains(nk)
+                    }
+
+                    val toRemove = fallback
+                        .distinctBy { it.id }
+                        .takeIf { it.isNotEmpty() }
+
+                    val aiText = if (toRemove != null) {
+                        val updated = currentProfile.copy(
+                            foodItems = currentProfile.foodItems.filterNot { fi -> toRemove.any { it.id == fi.id } }
+                        )
+                        userRepo.saveUserProfile(updated)
+                        _uiState.value = _uiState.value.copy(profile = updated)
+
+                        if (toRemove.size == 1) {
+                            "Removed '${toRemove.first().name}' from your list."
+                        } else {
+                            "Removed ${toRemove.size} items matching '$removeName' from your list."
+                        }
+                    } else {
+                        "I couldn’t find '$removeName' in your list."
+                    }
+
+                    val aiEntry = MessageEntry(
+                        id = UUID.randomUUID().toString(),
+                        sender = MessageSender.AI,
+                        text = aiText
+                    )
+                    messagesRepo.appendMessage(aiEntry)
+                    _uiState.value = _uiState.value.copy(
+                        isProcessing = false,
+                        messages = _uiState.value.messages + aiEntry
+                    )
+                    return@launch
+                }
+
                 val lastMeal = currentProfile?.mealHistory?.maxByOrNull { it.timestamp }
                 val hungerLevels = currentProfile?.hungerSignals?.map { it.level } ?: emptyList()
 
@@ -1414,6 +1910,13 @@ class HomeViewModel(
                     val now = java.time.LocalTime.now(zoneId)
                     val clientLocalMinutes = now.hour * 60 + now.minute
                     val tzOffsetMinutes = java.time.ZonedDateTime.now(zoneId).offset.totalSeconds / 60
+                    val aiUserMessage = buildString {
+                        append(message)
+                        if (shouldEncourageRecipeFormatting(message)) {
+                            append("\n\n")
+                            append(recipeFormattingRulesForAi())
+                        }
+                    }
                     proxyRepo.generateCheckIn(
                         CheckInRequest(
                             lastMeal = lastMeal?.mealName ?: lastMeal?.items?.joinToString(),
@@ -1426,8 +1929,8 @@ class HomeViewModel(
                             },
                             weightTrend = currentProfile?.let { estimateWeightTrend(it.weightHistory) },
                             minutesSinceMeal = minutesSinceMeal,
-                            tone = "user is chatting about meal suggestions, maybe rejecting or asking for swap; be short, casual, and adjust meal plan if needed",
-                            userMessage = message,
+                            tone = "Be short, casual, and helpful. If the user asks for a recipe, switch to recipe mode with clear sections/headings and detailed step-by-step instructions. If the user is asking you to analyze a photo/image or to use the camera, direct them to the in-app AI Evaluate Food button/camera flow instead of saying you cannot. Otherwise, answer their question normally.",
+                            userMessage = aiUserMessage,
                             mode = "freeform",
                             inventorySummary = inventorySummary,
                             dietType = currentProfile?.dietType?.name,
@@ -1509,7 +2012,10 @@ class HomeViewModel(
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(error = e.message)
             } finally {
-                _uiState.value = _uiState.value.copy(isProcessing = false)
+                // If we handed off to addFoodItemsBatch(), it owns the processing spinner.
+                if (!handedOffProcessingToBatch) {
+                    _uiState.value = _uiState.value.copy(isProcessing = false)
+                }
             }
         }
     }
@@ -1709,7 +2215,8 @@ class HomeViewModel(
         // Keep this conservative: we only want to mutate state on explicit user intent.
         val hasAddVerb = Regex("\\b(add|save|put|include)\\b").containsMatchIn(t)
         val hasListTarget = Regex("\\b(list|foods?|ingredients?|snacks?|meals?)\\b").containsMatchIn(t)
-        return hasAddVerb && hasListTarget
+        val looksLikeShortAdd = t.startsWith("add ") || t.startsWith("please add ") || t.startsWith("can you add ")
+        return hasAddVerb && (hasListTarget || looksLikeShortAdd)
     }
 
     private fun userLikelyLoggingCalories(userMessage: String): Boolean {
@@ -1996,7 +2503,9 @@ class HomeViewModel(
     fun generateMeal(
         requiredIngredients: List<String> = emptyList(),
         targetCalories: Int? = null,
-        strictOnly: Boolean = false
+        strictOnly: Boolean = false,
+        difficulty: RecipeDifficulty = RecipeDifficulty.SIMPLE,
+        cookTimeMinutes: Int? = null
     ) {
         viewModelScope.launch {
             try {
@@ -2013,6 +2522,7 @@ class HomeViewModel(
                     .distinctBy { it.lowercase() }
                     .take(6)
                 val target = targetCalories?.coerceIn(100, 1000)
+                val cookMins = cookTimeMinutes?.coerceIn(10, 240)
 
                 val replyResult = runCatching {
                     val now = java.time.LocalTime.now(zoneId)
@@ -2029,6 +2539,42 @@ class HomeViewModel(
                                 append("Generate a dinner recipe I can cook now. ")
                                 append("Use my INGREDIENTS list (and SNACKS if useful). ")
                                 append("Do not use emojis. ")
+                                append("Difficulty: ")
+                                append(difficulty.name)
+                                append(". ")
+                                when (difficulty) {
+                                    RecipeDifficulty.SIMPLE -> {
+                                        append("Make it simple and beginner-friendly: fewer steps, fewer techniques, and minimal multitasking. ")
+                                        append("Prefer 1 pan/pot when possible, and keep total active cooking time low. ")
+                                    }
+                                    RecipeDifficulty.ADVANCED -> {
+                                        append("Make it moderately challenging: more detailed technique, but still realistic for a home cook. ")
+                                        append("You may use 2 pans/pots and include a simple sauce or side if it fits. ")
+                                    }
+                                    RecipeDifficulty.EXPERT -> {
+                                        append("Make it expert-level, like a gourmet chef teaching a top culinary student. ")
+                                        append("Assume I already know the basics (knife skills, how to sauté, how to taste/season). ")
+                                        append("You MUST include at least 2 distinct components that are cooked/handled separately and combined at the end (e.g., main + sauce, or main + sauce + garnish/side). ")
+                                        append("Design the method so at least some steps run in parallel (multi-tasking), and explicitly call that out. ")
+                                        append("Include coordination/timing guidance like: what to start first, what can be done while something simmers/roasts, and what must be done last-minute. ")
+                                        append("Use precise culinary language and sensory doneness cues (color, texture, aroma) rather than only timers. ")
+                                        append("Include a short plating/finishing note (how to assemble and serve). ")
+                                        append("If a technique is advanced (emulsion, reduction, fond, deglaze, etc.), explain it briefly but in a confident instructor tone. ")
+                                    }
+                                }
+                                if (cookMins != null) {
+                                    append("Cook time target: about ")
+                                    append(cookMins)
+                                    append(" minutes total. ")
+                                    append("You MUST keep the recipe's stated total time consistent with this target (do not contradict it). ")
+                                    append("Include a line right under the title: \"Total time: ~")
+                                    append(cookMins)
+                                    append(" minutes\". ")
+                                    append("If you also include prep/cook time breakdowns, they must add up and still match ~")
+                                    append(cookMins)
+                                    append(" minutes. ")
+                                    append("If the recipe cannot realistically fit, say so and offer the closest alternative and explain why. ")
+                                }
                                 if (target != null) {
                                     append("Target about ")
                                     append(target)
@@ -2047,6 +2593,19 @@ class HomeViewModel(
                                         append("Also include an 'Ingredients used:' list and ensure it contains ONLY the selected ingredients plus any allowed pantry staples you used. ")
                                     }
                                 }
+                                append("To make the recipe easier to scan, you MAY insert a phase marker as a section divider on its own line, like:\n{phase: PREP}\n")
+                                append("Only use these phases for now: PREP, WASH, PEEL, CHOP, GRATE, MEASURE, MIX, WHISK, MEDIUM_BOWL, MARINATE, PREHEAT, SEAR, SAUTE, SIMMER, BOIL, BAKE, POUR, DRAIN, SEASON, REDUCE_HEAT, SET_TIMER, SKILLET. ")
+                                append("Rules: use at most 4 phase markers total, and never repeat the same phase more than once. ")
+                                append("Do NOT place phase markers inline after a sentence like \"mix this\" — only use them before a new section of steps. ")
+                                append("Start the recipe with a single title line as a Markdown heading, like:\n# Creamy Bacon & Eggs\n")
+                                append("Do NOT write \"Title:\" anywhere. ")
+                                append("Format the recipe into clear Markdown sections with headings (use ##). ")
+                                append("Example structure: ## Ingredients, ## Prep, ## Cook, ## Serve. ")
+                                if (difficulty == RecipeDifficulty.EXPERT) {
+                                    append("For EXPERT, also include a short ## Game plan section (1–4 bullets) describing parallel workflow and critical timing. ")
+                                    append("For EXPERT, also include a short ## Chef notes section (1–4 bullets) with technique tips and common pitfalls. ")
+                                }
+                                append("Right after each heading (except Ingredients), you MAY add ONE phase marker on its own line that best matches that section. ")
                                 append("Give step-by-step instructions with times/temps. ")
                                 append("If I don't have enough ingredients, say what I'm missing and suggest a short shopping list.")
                             },
@@ -2089,9 +2648,47 @@ class HomeViewModel(
 
                 // Safety: even with prompt instructions, models occasionally emit emojis.
                 // Strip them from stored recipe text so headers like "Missing / recommended" don't get random emoji icons.
-                val cleanedReplyText = replyText
+                val cleanedReplyTextRaw = replyText
                     .replace(Regex("[\\uD800-\\uDBFF][\\uDC00-\\uDFFF]"), "") // surrogate pairs (most emojis)
                     .replace("\uFE0F", "") // variation selector-16
+
+                fun ensureDifficultyLine(text: String, difficulty: RecipeDifficulty): String {
+                    val t = text.replace("\r", "").trimStart()
+                    if (t.isBlank()) return text
+
+                    val wantLevel = difficulty.name.lowercase().replaceFirstChar { it.uppercase() }
+                    val wantLine = "Difficulty: $wantLevel"
+                    val lines = t.lines()
+                    val early = lines.take(10).map { it.trim() }
+                    if (early.any { it.equals(wantLine, ignoreCase = true) }) return t
+                    if (early.any { it.equals("($wantLevel)", ignoreCase = true) }) return t
+
+                    // Prefer inserting after a leading "# Title" line.
+                    val firstIdx = lines.indexOfFirst { it.trim().startsWith("#") }
+                    if (firstIdx == -1) {
+                        // Fallback: put it at the very top.
+                        return (wantLine + "\n" + t).trimEnd()
+                    }
+
+                    val out = buildString {
+                        for (i in lines.indices) {
+                            append(lines[i])
+                            if (i != lines.lastIndex) append('\n')
+                            if (i == firstIdx) {
+                                // Insert right after the title line.
+                                append(wantLine)
+                                append('\n')
+                            }
+                        }
+                    }
+                    return out.trimEnd()
+                }
+
+                val cleanedReplyText = if (replyResult.isSuccess) {
+                    ensureDifficultyLine(cleanedReplyTextRaw, difficulty)
+                } else {
+                    cleanedReplyTextRaw
+                }
 
                 val aiEntry = MessageEntry(
                     id = UUID.randomUUID().toString(),
@@ -2107,6 +2704,209 @@ class HomeViewModel(
                 _uiState.value = _uiState.value.copy(error = e.message)
             } finally {
                 _uiState.value = _uiState.value.copy(isProcessing = false)
+            }
+        }
+    }
+
+    fun loadRecipeQa(recipeId: String) {
+        val id = recipeId.trim()
+        if (id.isBlank()) return
+        viewModelScope.launch {
+            try {
+                val log = recipeQnaRepo.getLog(id).log
+                val next = _uiState.value.recipeQaByRecipeId.toMutableMap().apply { put(id, log) }.toMap()
+                _uiState.value = _uiState.value.copy(recipeQaByRecipeId = next)
+            } catch (e: Exception) {
+                // Keep it quiet; Q&A is optional. We'll surface errors only via the main error line if needed.
+                _uiState.value = _uiState.value.copy(error = e.message ?: "Failed to load recipe questions.")
+            }
+        }
+    }
+
+    fun askRecipeQuestion(recipe: SavedRecipe, question: String) {
+        val q = question.trim()
+        if (q.isBlank()) return
+        val recipeId = recipe.id.trim()
+        if (recipeId.isBlank()) return
+
+        viewModelScope.launch {
+            try {
+                // Prevent double-sends for the same recipe.
+                if (_uiState.value.recipeQaBusyRecipeId == recipeId) return@launch
+                _uiState.value = _uiState.value.copy(recipeQaBusyRecipeId = recipeId)
+
+                val profile = userRepo.getUserProfile() ?: return@launch
+                val inventorySummary = buildInventorySummary(profile)
+
+                val existing = _uiState.value.recipeQaByRecipeId[recipeId].orEmpty()
+                val userEntry = MessageEntry(
+                    id = UUID.randomUUID().toString(),
+                    sender = MessageSender.USER,
+                    text = q
+                )
+
+                // Optimistic UI update.
+                val optimistic = (existing + userEntry).takeLast(60)
+                _uiState.value = _uiState.value.copy(
+                    recipeQaByRecipeId = _uiState.value.recipeQaByRecipeId.toMutableMap().apply { put(recipeId, optimistic) }.toMap()
+                )
+
+                recipeQnaRepo.appendMessage(recipeId, userEntry)
+
+                fun clip(s: String, max: Int): String {
+                    val t = s.replace("\r", "").trim()
+                    return if (t.length <= max) t else t.take(max) + "\n…"
+                }
+
+                fun recipeContextForPrompt(recipe: SavedRecipe): String {
+                    val raw = recipe.text.replace("\r", "").trim()
+                    if (raw.isBlank()) return ""
+
+                    // Keep it tight: Cloud Function truncates userMessage to 2000 chars.
+                    // Include the most useful bits for answering questions (ingredients + key sections).
+                    val lines = raw.lines().map { it.trimEnd() }
+
+                    val titleLine = lines.firstOrNull { it.trim().startsWith("#") }?.trim()
+                    val metaLines = lines
+                        .take(18)
+                        .map { it.trim() }
+                        .filter { it.startsWith("Difficulty:", ignoreCase = true) || it.startsWith("Total time:", ignoreCase = true) }
+                        .distinct()
+                        .take(3)
+
+                    val ingredientsBlock = buildString {
+                        val ings = recipe.ingredients.mapNotNull { it.trim().ifBlank { null } }.take(24)
+                        if (ings.isNotEmpty()) {
+                            append("Ingredients:\n")
+                            for (i in ings) {
+                                append("- ").append(i).append('\n')
+                            }
+                        }
+                    }.trimEnd()
+
+                    // Grab a short excerpt of the steps/notes (skip title + obvious meta lines).
+                    val excerpt = buildString {
+                        for (ln in lines) {
+                            val t = ln.trim()
+                            if (t.isBlank()) continue
+                            if (t.startsWith("#")) continue
+                            if (t.startsWith("Difficulty:", ignoreCase = true)) continue
+                            if (t.startsWith("Total time:", ignoreCase = true)) continue
+                            append(ln).append('\n')
+                        }
+                    }.trimEnd()
+
+                    return buildString {
+                        if (!titleLine.isNullOrBlank()) {
+                            append("Title: ").append(titleLine.removePrefix("#").trim()).append('\n')
+                        } else if (recipe.title.isNotBlank()) {
+                            append("Title: ").append(recipe.title.trim()).append('\n')
+                        }
+                        for (m in metaLines) append(m).append('\n')
+                        if (ingredientsBlock.isNotBlank()) {
+                            append('\n').append(ingredientsBlock).append('\n')
+                        }
+                        if (excerpt.isNotBlank()) {
+                            append("\nRecipe excerpt:\n")
+                            append(excerpt)
+                        }
+                    }.trim()
+                }
+
+                val recipeContext = recipeContextForPrompt(recipe)
+                val chatContext = buildChatContextForAi(optimistic)
+
+                val replyResult = runCatching {
+                    val now = java.time.LocalTime.now(zoneId)
+                    val clientLocalMinutes = now.hour * 60 + now.minute
+                    val tzOffsetMinutes = java.time.ZonedDateTime.now(zoneId).offset.totalSeconds / 60
+                    proxyRepo.generateCheckIn(
+                        CheckInRequest(
+                            lastMeal = profile.mealHistory.maxByOrNull { it.timestamp }?.mealName,
+                            hungerSummary = null,
+                            weightTrend = estimateWeightTrend(profile.weightHistory),
+                            minutesSinceMeal = null,
+                            mode = "freeform",
+                            tone = "recipe q&a: answer the user's question about the recipe; be practical and clear; no emojis",
+                            userMessage = buildString {
+                                // IMPORTANT:
+                                // Cloud Function truncates `userMessage` to 2000 chars.
+                                // Keep the question fully intact by limiting recipe context size.
+                                val header = buildString {
+                                    append("You are answering questions about the recipe below. ")
+                                    append("Answer based on the recipe context provided and normal cooking knowledge. ")
+                                    append("If something is missing from the excerpt, say so and ask ONE short clarifying question. ")
+                                    append("Do not use emojis.\n\n")
+                                }
+
+                                val questionBlock = buildString {
+                                    append("User question:\n")
+                                    append(q.trim())
+                                    append('\n')
+                                }
+
+                                // Reserve space for header + question; keep total under ~1900 chars for safety.
+                                val maxTotal = 1900
+                                val reserved = header.length + questionBlock.length + 60
+                                val maxRecipe = (maxTotal - reserved).coerceAtLeast(300)
+                                val recipeBlock = clip(recipeContext, maxRecipe)
+
+                                append(header)
+                                append("Recipe context (may be truncated):\n")
+                                append(recipeBlock)
+                                append("\n\n")
+                                append(questionBlock)
+                            },
+                            chatContext = chatContext,
+                            inventorySummary = inventorySummary,
+                            dietType = profile.dietType.name,
+                            fastingPreset = profile.fastingPreset.name,
+                            eatingWindowStartMinutes = profile.eatingWindowStartMinutes,
+                            eatingWindowEndMinutes = profile.eatingWindowEndMinutes,
+                            clientLocalMinutes = clientLocalMinutes,
+                            timezoneOffsetMinutes = tzOffsetMinutes
+                        )
+                    )
+                }.onFailure { e ->
+                    if (gateIfDailyLimit(e)) return@launch
+                }
+
+                val replyText = replyResult.getOrElse { e ->
+                    when (e) {
+                        is HttpException -> {
+                            if (e.code() == 429) {
+                                "Daily limit reached. Upgrade your plan to keep chatting."
+                            } else {
+                                "No service: ${describeProxyHttpError(e)}"
+                            }
+                        }
+                        else -> "No service. Check internet connectivity. (${e.javaClass.simpleName})"
+                    }
+                }
+
+                val cleaned = replyText
+                    .replace(Regex("[\\uD800-\\uDBFF][\\uDC00-\\uDFFF]"), "")
+                    .replace("\uFE0F", "")
+
+                val aiEntry = MessageEntry(
+                    id = UUID.randomUUID().toString(),
+                    sender = MessageSender.AI,
+                    text = cleaned
+                )
+
+                recipeQnaRepo.appendMessage(recipeId, aiEntry)
+
+                val final = (optimistic + aiEntry).takeLast(80)
+                _uiState.value = _uiState.value.copy(
+                    recipeQaByRecipeId = _uiState.value.recipeQaByRecipeId.toMutableMap().apply { put(recipeId, final) }.toMap()
+                )
+            } catch (e: Exception) {
+                if (gateIfDailyLimit(e)) return@launch
+                _uiState.value = _uiState.value.copy(error = e.message ?: "Failed to ask recipe question.")
+            } finally {
+                if (_uiState.value.recipeQaBusyRecipeId == recipeId) {
+                    _uiState.value = _uiState.value.copy(recipeQaBusyRecipeId = null)
+                }
             }
         }
     }
@@ -2299,6 +3099,98 @@ class HomeViewModel(
                     }
                     append(". ")
                     append(analysis.summary)
+                    val kind = analysis.portionKind?.trim()?.uppercase()
+                    val servingText = analysis.servingSizeText?.trim().orEmpty()
+                    val caloriesPerServing = analysis.caloriesPerServing
+                    val servingsPerContainer = analysis.servingsPerContainer
+                    val cals = analysis.caloriesTotal ?: analysis.estimatedCalories
+                    val low = analysis.caloriesLow
+                    val high = analysis.caloriesHigh
+
+                    if (kind == "PACKAGED") {
+                        if (caloriesPerServing != null) {
+                            append(" Calories per serving: ~")
+                            append(caloriesPerServing)
+                            if (servingText.isNotBlank()) {
+                                append(" (")
+                                append(servingText)
+                                append(")")
+                            }
+                            append(".")
+                        } else if (cals != null) {
+                            append(" Estimated calories per serving: ~")
+                            append(cals)
+                            append(".")
+                        }
+                        if (servingsPerContainer != null) {
+                            append(" Servings per container: ")
+                            append(servingsPerContainer)
+                            append(".")
+                            if (caloriesPerServing != null) {
+                                val whole = kotlin.math.round(caloriesPerServing * servingsPerContainer).toInt()
+                                append(" Whole package: ~")
+                                append(whole)
+                                append(" calories.")
+                            }
+                        }
+                    } else if (kind == "PLATED") {
+                        if (cals != null) {
+                            append(" Estimated calories for the full plate: ~")
+                            append(cals)
+                            if (low != null && high != null && low > 0 && high > 0) {
+                                append(" (")
+                                append(low)
+                                append("–")
+                                append(high)
+                                append(")")
+                            }
+                            append(".")
+                        }
+                        if (servingText.isNotBlank()) {
+                            append(" Serving size: ")
+                            append(servingText)
+                            append(".")
+                        } else {
+                            append(" Serving size: 1 plate.")
+                        }
+                    } else {
+                        if (cals != null) {
+                            append(" Estimated calories: ~")
+                            append(cals)
+                            if (low != null && high != null && low > 0 && high > 0) {
+                                append(" (")
+                                append(low)
+                                append("–")
+                                append(high)
+                                append(")")
+                            }
+                            append(".")
+                        }
+                    }
+
+                    val p = analysis.estimatedProteinG
+                    val c = analysis.estimatedCarbsG
+                    val f = analysis.estimatedFatG
+                    if (p != null || c != null || f != null) {
+                        append(" Estimated macros")
+                        if (kind == "PACKAGED") append(" (per serving)") else if (kind == "PLATED") append(" (full plate)")
+                        append(":")
+                        if (p != null) {
+                            append(" Protein: ")
+                            append(p)
+                            append("g.")
+                        }
+                        if (c != null) {
+                            append(" Carbohydrates: ")
+                            append(c)
+                            append("g.")
+                        }
+                        if (f != null) {
+                            append(" Fat: ")
+                            append(f)
+                            append("g.")
+                        }
+                    }
                     if (analysis.concerns.isNotBlank()) {
                         append(" Concerns: ")
                         append(analysis.concerns)
@@ -2312,20 +3204,32 @@ class HomeViewModel(
                 )
                 messagesRepo.appendMessage(aiEntry)
 
+                val suggestedCat = analysis.suggestedCategory?.trim()?.uppercase()
+                val catForList = when (suggestedCat) {
+                    "MEAL" -> "MEAL"
+                    "SNACK" -> "SNACK"
+                    "INGREDIENT" -> "INGREDIENT"
+                    else -> "INGREDIENT"
+                }
+
                 val item = FoodItem(
                     id = UUID.randomUUID().toString(),
                     name = analysis.normalizedName,
                     quantity = 1,
-                    categories = listOf("SNACK"),
+                    categories = listOf(catForList),
                     photoUrl = productUrl,
                     labelUrl = labelUrl,
                     nutritionFactsUrl = nutritionFactsUrl,
                     notes = analysis.summary,
-                    estimatedCalories = analysis.estimatedCalories,
+                    estimatedCalories = analysis.caloriesTotal ?: analysis.estimatedCalories,
                     estimatedProteinG = analysis.estimatedProteinG,
                     estimatedCarbsG = analysis.estimatedCarbsG,
                     estimatedFatG = analysis.estimatedFatG,
                     ingredientsText = analysis.ingredientsText,
+                    portionKind = analysis.portionKind,
+                    servingSizeText = analysis.servingSizeText,
+                    caloriesPerServing = analysis.caloriesPerServing,
+                    servingsPerContainer = analysis.servingsPerContainer,
                     rating = analysis.rating,
                     dietFitRating = dietFit,
                     dietRatings = analysis.dietRatings.toMutableMap().apply {
@@ -2340,7 +3244,13 @@ class HomeViewModel(
                     pendingGrocery = PendingGrocery(
                         id = UUID.randomUUID().toString(),
                         aiMessage = message,
-                        item = item
+                        item = item,
+                        portionKind = analysis.portionKind,
+                        caloriesPerServing = analysis.caloriesPerServing,
+                        servingsPerContainer = analysis.servingsPerContainer,
+                        caloriesTotal = analysis.caloriesTotal ?: analysis.estimatedCalories,
+                        caloriesLow = analysis.caloriesLow,
+                        caloriesHigh = analysis.caloriesHigh
                     )
                 )
             } catch (e: Exception) {
@@ -2392,7 +3302,7 @@ class HomeViewModel(
         }
     }
 
-    fun confirmAddPendingGrocery() {
+    fun confirmAddPendingGrocery(caloriesOverride: Int? = null) {
         viewModelScope.launch {
             try {
                 val state = _uiState.value
@@ -2403,7 +3313,13 @@ class HomeViewModel(
                     return@launch
                 }
 
-                val updated = profile.copy(foodItems = profile.foodItems + pending.item)
+                val finalItem = if (caloriesOverride != null && caloriesOverride > 0) {
+                    pending.item.copy(estimatedCalories = caloriesOverride)
+                } else {
+                    pending.item
+                }
+
+                val updated = profile.copy(foodItems = profile.foodItems + finalItem)
                 userRepo.saveUserProfile(updated)
                 messagesRepo.appendMessage(
                     MessageEntry(

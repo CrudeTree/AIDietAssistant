@@ -15,7 +15,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
@@ -42,9 +45,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.matchpoint.myaidietapp.R
+import com.matchpoint.myaidietapp.model.RecipeDifficulty
 import kotlinx.coroutines.delay
 
 @Composable
@@ -53,16 +58,21 @@ fun ExistingIngredientsPickerDialog(
     enabled: Boolean,
     resolveIcon: (String) -> Int?,
     onDismiss: () -> Unit,
-    onGenerate: (picked: List<String>, targetCalories: Int?, strictOnly: Boolean) -> Unit,
+    onGenerate: (picked: List<String>, targetCalories: Int?, strictOnly: Boolean, difficulty: RecipeDifficulty, cookTimeMinutes: Int?) -> Unit,
     tutorialStep: Int = -1,
     tutorialActive: Boolean = false,
     onTutorialSkip: () -> Unit = {},
     onTutorialNext: () -> Unit = {}
 ) {
     var picked by rememberSaveable { mutableStateOf(setOf<String>()) }
+    var page by rememberSaveable { mutableStateOf(1) } // 1=ingredients, 2=options
+    var caloriesEnabled by rememberSaveable { mutableStateOf(true) }
     var sliderValue by rememberSaveable { mutableStateOf(500f) }
     var query by rememberSaveable { mutableStateOf("") }
     var strictOnly by rememberSaveable { mutableStateOf(false) }
+    var difficultyName by rememberSaveable { mutableStateOf(RecipeDifficulty.SIMPLE.name) }
+    var cookTimeEnabled by rememberSaveable { mutableStateOf(false) }
+    var cookTimeValue by rememberSaveable { mutableStateOf(30f) }
     val green = Color(0xFF22C55E)
     val blue = Color(0xFF1E88E5)
 
@@ -77,6 +87,9 @@ fun ExistingIngredientsPickerDialog(
     }
 
     val lockDismiss = tutorialActive && tutorialStep == 19
+    LaunchedEffect(lockDismiss) {
+        if (lockDismiss) page = 2
+    }
     Dialog(onDismissRequest = { if (!lockDismiss) onDismiss() }) {
         Box(
             modifier = Modifier
@@ -104,7 +117,7 @@ fun ExistingIngredientsPickerDialog(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Pick ingredients to include",
+                            text = if (page == 1) "Pick ingredients to include" else "Meal options",
                             fontWeight = FontWeight.SemiBold,
                             style = MaterialTheme.typography.titleMedium,
                             modifier = Modifier.weight(1f)
@@ -118,149 +131,305 @@ fun ExistingIngredientsPickerDialog(
                         }
                     }
 
-                    if (candidates.isEmpty()) {
-                        Text(
-                            text = "No ingredients in your list yet. Add ingredients first, or use the beginner picker next time you sign in.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    } else {
-                        OutlinedTextField(
-                            value = query,
-                            onValueChange = { query = it },
-                            enabled = enabled,
-                            singleLine = true,
-                            placeholder = { Text("Search ingredients") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                    val canProceedFromPage1 = enabled && if (strictOnly) picked.isNotEmpty() else (picked.isNotEmpty() || candidates.isNotEmpty())
 
-                        if (filtered.isEmpty()) {
+                    if (page == 1) {
+                        if (candidates.isEmpty()) {
                             Text(
-                                text = "No matches.",
+                                text = "No ingredients in your list yet. Add ingredients first, or use the beginner picker next time you sign in.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         } else {
-                            // Only the list scrolls, so the Calorie slider + Generate button stay reachable.
-                            LazyColumn(
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f, fill = true)
-                            ) {
-                                items(filtered.take(250), key = { it.lowercase() }) { name ->
-                                    val isOn = picked.contains(name)
-                                    val bg = if (isOn) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Transparent
-                                    val iconId = resolveIcon(name)
-                                    val iconSlotSize = 52.dp
-                                    // Increase non-wallpaper food icons by ~1.5x, but keep "Chicken" as-is (already tuned).
-                                    val iconDrawSize = when {
-                                        name.equals("Chicken", ignoreCase = true) -> 52.dp
-                                        else -> 39.dp
-                                    }
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .background(bg, RoundedCornerShape(14.dp))
-                                            .clickable(enabled = enabled) {
-                                                if (isOn) {
-                                                    picked = picked - name
-                                                } else {
-                                                    picked = picked + name
-                                                    // After selecting from a filtered search, clear the query so the user can quickly add more.
-                                                    query = ""
-                                                }
-                                            }
-                                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        if (iconId != null) {
-                                            Box(modifier = Modifier.size(iconSlotSize), contentAlignment = Alignment.Center) {
-                                                androidx.compose.material3.Icon(
-                                                    painter = painterResource(id = iconId),
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(iconDrawSize),
-                                                    tint = Color.Unspecified
-                                                )
-                                            }
-                                        } else {
-                                            Spacer(modifier = Modifier.size(iconSlotSize))
-                                        }
+                            OutlinedTextField(
+                                value = query,
+                                onValueChange = { query = it },
+                                enabled = enabled,
+                                singleLine = true,
+                                placeholder = { Text("Search ingredients") },
+                                modifier = Modifier.fillMaxWidth()
+                            )
 
-                                        Text(
-                                            text = name,
-                                            style = MaterialTheme.typography.bodyLarge,
-                                            fontWeight = if (isOn) FontWeight.Bold else FontWeight.Medium
-                                        )
+                            if (filtered.isEmpty()) {
+                                Text(
+                                    text = "No matches.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            } else {
+                                // Only the list scrolls, so Next stays reachable.
+                                LazyColumn(
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f, fill = true)
+                                ) {
+                                    items(filtered.take(250), key = { it.lowercase() }) { name ->
+                                        val isOn = picked.contains(name)
+                                        val bg = if (isOn) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Transparent
+                                        val iconId = resolveIcon(name)
+                                        val iconSlotSize = 52.dp
+                                        // Increase non-wallpaper food icons by ~1.5x, but keep "Chicken" as-is (already tuned).
+                                        val iconDrawSize = when {
+                                            name.equals("Chicken", ignoreCase = true) -> 52.dp
+                                            else -> 39.dp
+                                        }
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .background(bg, RoundedCornerShape(14.dp))
+                                                .clickable(enabled = enabled) {
+                                                    if (isOn) {
+                                                        picked = picked - name
+                                                    } else {
+                                                        picked = picked + name
+                                                        // After selecting from a filtered search, clear the query so the user can quickly add more.
+                                                        query = ""
+                                                    }
+                                                }
+                                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            if (iconId != null) {
+                                                Box(modifier = Modifier.size(iconSlotSize), contentAlignment = Alignment.Center) {
+                                                    androidx.compose.material3.Icon(
+                                                        painter = painterResource(id = iconId),
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(iconDrawSize),
+                                                        tint = Color.Unspecified
+                                                    )
+                                                }
+                                            } else {
+                                                Spacer(modifier = Modifier.size(iconSlotSize))
+                                            }
+
+                                            Text(
+                                                text = name,
+                                                style = MaterialTheme.typography.bodyLarge,
+                                                fontWeight = if (isOn) FontWeight.Bold else FontWeight.Medium
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    Text(
-                        text = "Calories",
-                        fontWeight = FontWeight.SemiBold,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Text(
-                        text = "${sliderValue.toInt().coerceIn(100, 1000)} calories",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Slider(
-                        value = sliderValue,
-                        onValueChange = { sliderValue = it },
-                        valueRange = 100f..1000f,
-                        steps = 17, // 50-cal increments between 100..1000
-                        enabled = enabled,
-                        colors = SliderDefaults.colors(
-                            thumbColor = green,
-                            activeTrackColor = green,
-                            activeTickColor = green,
-                            inactiveTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
-                            inactiveTickColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Only use selected ingredients",
-                                fontWeight = FontWeight.SemiBold,
-                                style = MaterialTheme.typography.bodyMedium
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Only use selected ingredients",
+                                    fontWeight = FontWeight.SemiBold,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
+                            Switch(
+                                checked = strictOnly,
+                                onCheckedChange = { strictOnly = it },
+                                enabled = enabled
                             )
                         }
-                        Switch(
-                            checked = strictOnly,
-                            onCheckedChange = { strictOnly = it },
-                            enabled = enabled
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Spacer(modifier = Modifier.weight(1f))
+                            Button(
+                                onClick = { page = 2 },
+                                enabled = canProceedFromPage1
+                            ) { Text("Next") }
+                        }
+                    } else {
+                        // Make options scrollable while keeping the CTA at the bottom.
+                        val optionsScroll = rememberScrollState()
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f, fill = true)
+                                .verticalScroll(optionsScroll),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Calories",
+                                    fontWeight = FontWeight.SemiBold,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Text(
+                                    text = "Optional: turn off if you don’t care about calories.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = caloriesEnabled,
+                                onCheckedChange = { caloriesEnabled = it },
+                                enabled = enabled
+                            )
+                        }
+
+                        if (caloriesEnabled) {
+                            Text(
+                                text = "${sliderValue.toInt().coerceIn(100, 1000)} calories",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Slider(
+                                value = sliderValue,
+                                onValueChange = { sliderValue = it },
+                                valueRange = 100f..1000f,
+                                steps = 17, // 50-cal increments between 100..1000
+                                enabled = enabled,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = green,
+                                    activeTrackColor = green,
+                                    activeTickColor = green,
+                                    inactiveTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                                    inactiveTickColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+
+                        Text(
+                            text = "Difficulty",
+                            fontWeight = FontWeight.SemiBold,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val pickedDifficulty = runCatching { RecipeDifficulty.valueOf(difficultyName) }.getOrNull()
+                                ?: RecipeDifficulty.SIMPLE
+                            listOf(
+                                RecipeDifficulty.SIMPLE to "Simple",
+                                RecipeDifficulty.ADVANCED to "Advanced",
+                                RecipeDifficulty.EXPERT to "Expert"
+                            ).forEach { (diff, label) ->
+                                val isOn = pickedDifficulty == diff
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    tonalElevation = 0.dp,
+                                    color = if (isOn) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Transparent,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isOn) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f)
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable(enabled = enabled) { difficultyName = diff.name }
+                                ) {
+                                    Text(
+                                        text = label,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 10.dp, horizontal = 10.dp),
+                                        style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = if (isOn) FontWeight.SemiBold else FontWeight.Medium,
+                                    textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Cook time",
+                                    fontWeight = FontWeight.SemiBold,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Text(
+                                    text = "Optional: set a time target.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = cookTimeEnabled,
+                                onCheckedChange = { cookTimeEnabled = it },
+                                enabled = enabled
+                            )
+                        }
+
+                        if (cookTimeEnabled) {
+                            val mins = cookTimeValue.toInt().coerceIn(10, 120)
+                            Text(
+                                text = "About $mins minutes",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Slider(
+                                value = cookTimeValue,
+                                onValueChange = { cookTimeValue = it },
+                                valueRange = 10f..120f,
+                                steps = 10,
+                                enabled = enabled,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = blue,
+                                    activeTrackColor = blue,
+                                    activeTickColor = blue,
+                                    inactiveTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                                    inactiveTickColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        } // end scrollable options
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(
+                                onClick = { page = 1 },
+                                enabled = enabled && !lockDismiss
+                            ) { Text("Back") }
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+
+                        // Generate Meal CTA pinned at the very bottom of the popup.
+                        val canGenerate = canProceedFromPage1
+                        val alpha = if (canGenerate) 1f else 0.45f
+                        androidx.compose.foundation.Image(
+                            painter = painterResource(id = R.drawable.generate_meal),
+                            contentDescription = "Generate meal",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(72.dp)
+                                .clickable(enabled = canGenerate) {
+                                    val diff = runCatching { RecipeDifficulty.valueOf(difficultyName) }.getOrNull()
+                                        ?: RecipeDifficulty.SIMPLE
+                                    val calories = if (caloriesEnabled) sliderValue.toInt().coerceIn(100, 1000) else null
+                                    val cookMins = if (cookTimeEnabled) cookTimeValue.toInt().coerceIn(10, 120) else null
+                                    onGenerate(picked.toList(), calories, strictOnly, diff, cookMins)
+                                },
+                            contentScale = ContentScale.Fit,
+                            alpha = alpha
                         )
                     }
-
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    val canGenerate = enabled && if (strictOnly) picked.isNotEmpty() else (picked.isNotEmpty() || candidates.isNotEmpty())
-                    // Use the same CTA asset for consistency.
-                    val alpha = if (canGenerate) 1f else 0.45f
-                    androidx.compose.foundation.Image(
-                        painter = painterResource(id = R.drawable.generate_meal),
-                        contentDescription = "Generate meal",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(72.dp)
-                            .clickable(enabled = canGenerate) {
-                                onGenerate(picked.toList(), sliderValue.toInt().coerceIn(100, 1000), strictOnly)
-                            },
-                        contentScale = ContentScale.Fit,
-                        alpha = alpha
-                    )
 
                     // Locked tutorial step: hide the dialog instructions and require Generate Meal to proceed.
                     // Provide a blue Skip link at the bottom center to exit tutorial.
@@ -285,7 +454,7 @@ fun ExistingIngredientsPickerDialog(
         val msg = when (tutorialStep) {
             16 -> "Here we have access to the list you started creating earlier."
             17 -> "(If you don’t see any items here, something may have happened and you may not have any items in your ingredients list.)"
-            else -> "Select a few ingredients and set your calorie target. If you want me to stick to ONLY what you picked, turn on \"Only use selected ingredients\". When you’re ready, tap Generate Meal."
+            else -> "Select a few ingredients. If you want me to stick to ONLY what you picked, turn on \"Only use selected ingredients\". Tap Next to set calories (optional), difficulty, and cook time. Then tap Generate Meal."
         }
 
         Dialog(onDismissRequest = { /* block outside dismiss during tutorial pages */ }) {

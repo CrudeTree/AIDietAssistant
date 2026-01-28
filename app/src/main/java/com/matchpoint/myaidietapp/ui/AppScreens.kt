@@ -137,6 +137,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import com.matchpoint.myaidietapp.data.ReviewPromptManager
 import androidx.compose.material3.Slider
+import kotlin.math.roundToInt
 
 private enum class Screen {
     HOME,
@@ -272,9 +273,12 @@ fun DigitalStomachApp() {
     var lockedPhotoCategories by remember { mutableStateOf<Set<String>?>(null) }
     var pendingPlanNotice by remember { mutableStateOf<String?>(null) }
     val tutorialManager = remember(context) { HomeTutorialManager(context.applicationContext) }
+    val helperManager = remember(context, authUid) { HelperManager(context.applicationContext, authUid ?: "") }
+    val helperRegistry = remember { HelperRegistry() }
 
     // Global skip confirmation dialog (used by all tutorial "Skip" buttons).
-    tutorialManager.pendingSkipConfirmAction()?.let { onConfirmExit ->
+    val pendingSkipConfirm = tutorialManager.pendingSkipConfirmAction()
+    pendingSkipConfirm?.let { onConfirmExit ->
         AlertDialog(
             onDismissRequest = { tutorialManager.clearSkipConfirm() },
             title = { Text("Exit tutorial?") },
@@ -296,6 +300,12 @@ fun DigitalStomachApp() {
     var purchaseInFlight by remember { mutableStateOf(false) }
     var openRecipeId by remember { mutableStateOf<String?>(null) }
     var openDailyPlanMealId by remember { mutableStateOf<String?>(null) }
+    // Home-only popup state is lifted so the helper can stay above those dialogs.
+    var homeShowExistingIngredientsPicker by rememberSaveable { mutableStateOf(false) }
+    var homeShowDailyPlanPopup by rememberSaveable { mutableStateOf(false) }
+    var homeShowDailyPlanOverlay by rememberSaveable { mutableStateOf(false) }
+    // Home-only chat fullscreen state so we can suppress the helper.
+    var homeChatFullscreen by rememberSaveable { mutableStateOf(false) }
     // Photo-based food capture no longer uses a quantity (always 1).
 
     fun navigate(to: Screen) {
@@ -326,6 +336,11 @@ fun DigitalStomachApp() {
         screen = Screen.HOME
     }
 
+    // Safety: if we leave Home, ensure chat isn't considered fullscreen.
+    LaunchedEffect(screen) {
+        if (screen != Screen.HOME && homeChatFullscreen) homeChatFullscreen = false
+    }
+
     // System back behavior:
     // - From any screen: go back to previous screen
     // - From HOME: let Android handle back (app exits)
@@ -337,12 +352,13 @@ fun DigitalStomachApp() {
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
     ) {
-        // Global in-app update banner (only shows on Play-installed builds when an update is available)
-        Box(modifier = Modifier.fillMaxSize()) {
-            InAppUpdatePrompt(modifier = Modifier.align(Alignment.TopCenter))
-
-            // Main app content below
+        ProvideHelperRegistry(helperRegistry) {
+            // Global in-app update banner (only shows on Play-installed builds when an update is available)
             Box(modifier = Modifier.fillMaxSize()) {
+                InAppUpdatePrompt(modifier = Modifier.align(Alignment.TopCenter))
+
+                // Main app content below
+                Box(modifier = Modifier.fillMaxSize()) {
         if (authUid == null) {
             var authError by remember { mutableStateOf<String?>(null) }
             var authLoading by remember { mutableStateOf(false) }
@@ -370,8 +386,6 @@ fun DigitalStomachApp() {
                     scope.launch {
                         try {
                             authRepo.createAccount(email, password)
-                            // On first account creation, show the guided tutorial on Home.
-                            tutorialManager.requestReplay()
                             // Make the post-auth landing deterministic (Home).
                             backStack.clear()
                             screen = Screen.HOME
@@ -385,21 +399,38 @@ fun DigitalStomachApp() {
                     }
                 }
             )
-            return@Surface
-        }
+        } else {
+            // Safe: vm exists if authUid != null
+            val realVm = vm!!
+            val state by realVm.uiState.collectAsState()
 
-        // Safe: vm exists if authUid != null
-        val realVm = vm!!
-        val state by realVm.uiState.collectAsState()
+        // Safety: if profile failed to load, don't leave the app "stuck" on a non-Home screen
+        // while still rendering Home (which makes buttons appear broken).
+        LaunchedEffect(state.isLoading, state.profile, screen) {
+            if (!state.isLoading && state.profile == null && screen != Screen.HOME) {
+                backStack.clear()
+                screen = Screen.HOME
+            }
+        }
 
         // Tutorial analytics: record farthest tutorial step reached in Firestore.
         // We sync while the tutorial is active, and also keep syncing as max increases.
         val tutActive = tutorialManager.shouldShow()
+        val tutStepNow = tutorialManager.step()
         val tutMax = tutorialManager.maxStepReached()
-        LaunchedEffect(authUid, tutActive, tutMax) {
-            if (authUid != null && (tutActive || tutMax > 0)) {
-                // Clamp to 32 steps for analytics display (e.g. "4/32", "32/32").
-                realVm.updateTutorialProgress(tutMax, totalSteps = 32)
+        val tutProgress = maxOf(tutStepNow, tutMax)
+        LaunchedEffect(authUid, tutActive, tutProgress) {
+            if (authUid != null && (tutActive || tutProgress > 0)) {
+                // Clamp to 32 steps for analytics display (e.g. "3/32", "32/32").
+                realVm.updateTutorialProgress(tutProgress, totalSteps = 32)
+            }
+        }
+        // More reliable: persist progress immediately when the tutorial advances.
+        LaunchedEffect(authUid) {
+            tutorialManager.setProgressListener { maxStep ->
+                if (authUid != null && maxStep > 0) {
+                    realVm.updateTutorialProgress(maxStep, totalSteps = 32)
+                }
             }
         }
 
@@ -419,25 +450,25 @@ fun DigitalStomachApp() {
             }
         }
 
-        // Handle purchase results globally so the UI updates everywhere (no intermediate payment screen).
-        LaunchedEffect(rc) {
-            rc.events.collect { e ->
-                when (e) {
-                    is RevenueCatEvent.Error -> {
-                        purchaseInFlight = false
-                        // Keep the user on the plan page if they're there, and show the message.
-                        pendingPlanNotice = e.message
-                    }
-                    is RevenueCatEvent.TierUpdated -> {
-                        if (purchaseInFlight && e.tier != com.matchpoint.myaidietapp.model.SubscriptionTier.FREE) {
+            // Handle purchase results globally so the UI updates everywhere (no intermediate payment screen).
+            LaunchedEffect(rc) {
+                rc.events.collect { e ->
+                    when (e) {
+                        is RevenueCatEvent.Error -> {
                             purchaseInFlight = false
-                            pendingPlanNotice = null
-                            goHomeClear()
+                            // Keep the user on the plan page if they're there, and show the message.
+                            pendingPlanNotice = e.message
+                        }
+                        is RevenueCatEvent.TierUpdated -> {
+                            if (purchaseInFlight && e.tier != com.matchpoint.myaidietapp.model.SubscriptionTier.FREE) {
+                                purchaseInFlight = false
+                                pendingPlanNotice = null
+                                goHomeClear()
+                            }
                         }
                     }
                 }
             }
-        }
 
         // If user tapped "Upgrade/Change plan", launch the Google Play purchase sheet immediately
         // once offerings are available.
@@ -503,6 +534,11 @@ fun DigitalStomachApp() {
             com.matchpoint.myaidietapp.model.SubscriptionTier.PRO -> 1000
         }
 
+        // Keep ViewModel limits in sync with RevenueCat tier (Firestore tier can lag).
+        LaunchedEffect(currentTierForPlanUi) {
+            vm?.setEffectiveTierOverride(currentTierForPlanUi)
+        }
+
         // If a quota/limit is hit, send user to Choose Plan screen with a notice banner.
         val gate = state.planGateNotice
         if (gate != null) {
@@ -515,6 +551,25 @@ fun DigitalStomachApp() {
 
         when {
             state.isLoading -> LoadingScreen()
+            // If profile is missing after loading, show a clear message instead of rendering Home
+            // (which can make navigation buttons appear non-functional).
+            state.profile == null -> Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("Loading your profile…")
+                if (!state.error.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = state.error ?: "",
+                        color = Color(0xFFB00020),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
             screen == Screen.ADD_ENTRY && state.profile != null -> AddEntryScreen(
                 onAddMealByText = {
                     textEntryMode = TextEntryMode.MEAL
@@ -567,8 +622,8 @@ fun DigitalStomachApp() {
                     TextEntryMode.SNACK -> setOf("SNACK")
                 },
                 isProcessing = state.isProcessing,
-                remainingSlots = (foodLimitFor(state.profile!!.subscriptionTier) - state.profile!!.foodItems.size).coerceAtLeast(0),
-                limit = foodLimitFor(state.profile!!.subscriptionTier),
+                remainingSlots = (foodLimitFor(currentTierForPlanUi) - state.profile!!.foodItems.size).coerceAtLeast(0),
+                limit = foodLimitFor(currentTierForPlanUi),
                 tutorialManager = tutorialManager,
                 onSubmit = { names, categories ->
                     vm.addFoodItemsBatch(names, categories)
@@ -625,7 +680,7 @@ fun DigitalStomachApp() {
                 dietType = state.profile!!.dietType,
                 items = state.profile!!.foodItems,
                 filterCategory = foodListFilter,
-                totalLimit = foodLimitFor(state.profile!!.subscriptionTier),
+                totalLimit = foodLimitFor(currentTierForPlanUi),
                 showFoodIcons = state.profile!!.showFoodIcons,
                 fontSizeSp = state.profile!!.uiFontSizeSp,
                 tutorialManager = tutorialManager,
@@ -640,8 +695,14 @@ fun DigitalStomachApp() {
                     }
                     navigate(Screen.TEXT_FOOD_ENTRY)
                 },
-                onAddPhotos = { category ->
-                    lockedPhotoCategories = setOf(category)
+                onAddFindIngredients = { names ->
+                    // Only exposed on the Ingredients list page UI.
+                    vm.addFoodItemsBatch(names, setOf("INGREDIENT"))
+                    goHomeClear()
+                },
+                onAddPhoto = { category ->
+                    // Lock the category so the photo entry is tagged correctly.
+                    lockedPhotoCategories = setOf(category.trim().uppercase())
                     navigate(Screen.PHOTO_CAPTURE)
                 },
                 onOpenAddFoodHub = {
@@ -680,10 +741,12 @@ fun DigitalStomachApp() {
             screen == Screen.SETTINGS && state.profile != null -> SettingsScreen(
                 profile = state.profile!!,
                 tutorialManager = tutorialManager,
+                helperEnabled = helperManager.isEnabled(),
                 isProcessing = state.isProcessing,
                 errorText = state.error,
                 onBack = { popOrHome() },
                 onGoHome = { goHomeClear() },
+                onToggleHelperEnabled = { enabled -> helperManager.setEnabled(enabled) },
                 onToggleShowFoodIcons = { show -> vm.updateShowFoodIcons(show) },
                 onToggleShowWallpaperFoodIcons = { show -> vm.updateShowWallpaperFoodIcons(show) },
                 onToggleShowVineOverlay = { show -> vm.updateShowVineOverlay(show) },
@@ -724,9 +787,15 @@ fun DigitalStomachApp() {
                     popOrHome()
                     Unit
                 } else {
+                    LaunchedEffect(recipe.id) {
+                        vm.loadRecipeQa(recipe.id)
+                    }
                     RecipeDetailScreen(
                         recipe = recipe,
                         profile = state.profile!!,
+                        qaMessages = state.recipeQaByRecipeId[recipe.id].orEmpty(),
+                        qaBusy = state.recipeQaBusyRecipeId == recipe.id,
+                        onAskQuestion = { q -> vm.askRecipeQuestion(recipe, q) },
                         onBack = { popOrHome() }
                     )
                 }
@@ -746,9 +815,15 @@ fun DigitalStomachApp() {
                         text = meal.recipeText,
                         ingredients = parsed.ingredients
                     )
+                    LaunchedEffect(tmp.id) {
+                        vm.loadRecipeQa(tmp.id)
+                    }
                     RecipeDetailScreen(
                         recipe = tmp,
                         profile = state.profile!!,
+                        qaMessages = state.recipeQaByRecipeId[tmp.id].orEmpty(),
+                        qaBusy = state.recipeQaBusyRecipeId == tmp.id,
+                        onAskQuestion = { q -> vm.askRecipeQuestion(tmp, q) },
                         onBack = { popOrHome() },
                         onSave = { vm.saveDailyPlanMeal(meal.id) }
                     )
@@ -794,6 +869,13 @@ fun DigitalStomachApp() {
             else -> HomeScreen(
                 state = state,
                 tutorialManager = tutorialManager,
+                showExistingIngredientsPicker = homeShowExistingIngredientsPicker,
+                onSetShowExistingIngredientsPicker = { homeShowExistingIngredientsPicker = it },
+                showDailyPlanPopup = homeShowDailyPlanPopup,
+                onSetShowDailyPlanPopup = { homeShowDailyPlanPopup = it },
+                showDailyPlanOverlay = homeShowDailyPlanOverlay,
+                onSetShowDailyPlanOverlay = { homeShowDailyPlanOverlay = it },
+                onSetChatFullscreen = { homeChatFullscreen = it },
                 onAddFood = { name, qty, productUrl, labelUrl ->
                     vm.addFoodItemSimple(name, setOf("SNACK"), qty, productUrl, labelUrl, null)
                 },
@@ -805,7 +887,9 @@ fun DigitalStomachApp() {
                 onOpenAddEntry = { navigate(Screen.ADD_FOOD_CATEGORY) },
                 onOpenGroceryScan = { navigate(Screen.GROCERY_SCAN) },
                 onOpenMenuScan = { navigate(Screen.MENU_SCAN) },
-                onGenerateMeal = { required, targetCalories, strictOnly -> vm.generateMeal(required, targetCalories, strictOnly) },
+                onGenerateMeal = { required, targetCalories, strictOnly, difficulty, cookTimeMinutes ->
+                    vm.generateMeal(required, targetCalories, strictOnly, difficulty, cookTimeMinutes)
+                },
                 onGenerateDailyPlan = { target, count, savedOnly -> vm.generateDailyPlan(target, count, savedOnly) },
                 onCompleteDailyPlanMeal = { id -> vm.completeDailyPlanMeal(id) },
                 onOpenDailyPlanMeal = { id ->
@@ -815,7 +899,7 @@ fun DigitalStomachApp() {
                 onClearDailyPlan = { vm.clearDailyPlan() },
                 onSaveDailyPlanMeal = { id -> vm.saveDailyPlanMeal(id) },
                 onSaveRecipe = { messageId -> vm.saveRecipeFromMessage(messageId) },
-                onConfirmGroceryAdd = { vm.confirmAddPendingGrocery() },
+                onConfirmGroceryAdd = { caloriesOverride -> vm.confirmAddPendingGrocery(caloriesOverride) },
                 onDiscardGrocery = { vm.discardPendingGrocery() },
                 onNewChat = { vm.newChat() },
                 onSelectChat = { chatId -> vm.selectChat(chatId) },
@@ -823,6 +907,36 @@ fun DigitalStomachApp() {
                 wallpaperSeed = wallpaperSeed
             )
         }
+
+        // Global helper overlay:
+        // - Hidden during "Spinning up your AI Food Coach…" loading state
+        // - Hidden on Settings screen
+        // - Hidden while popups are showing (Daily Plan, Generate Meal picker, etc.)
+        val suppressHelper =
+            state.isLoading ||
+            screen == Screen.SETTINGS ||
+            // Hide helper on recipe list + recipe detail screens.
+            screen == Screen.RECIPES ||
+            screen == Screen.RECIPE_DETAIL ||
+            screen == Screen.DAILY_PLAN_RECIPE_DETAIL ||
+            pendingSkipConfirm != null ||
+            pendingPurchase != null ||
+            homeShowExistingIngredientsPicker ||
+            homeShowDailyPlanPopup ||
+            homeShowDailyPlanOverlay ||
+            homeChatFullscreen
+
+        if (!suppressHelper) {
+            HelperOverlay(
+                helperManager = helperManager,
+                registry = helperRegistry,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(20000f)
+            )
+        }
+        }
+                }
             }
         }
     }
@@ -1132,6 +1246,13 @@ fun OnboardingScreen(
 fun HomeScreen(
     state: UiState,
     tutorialManager: HomeTutorialManager,
+    showExistingIngredientsPicker: Boolean,
+    onSetShowExistingIngredientsPicker: (Boolean) -> Unit,
+    showDailyPlanPopup: Boolean,
+    onSetShowDailyPlanPopup: (Boolean) -> Unit,
+    showDailyPlanOverlay: Boolean,
+    onSetShowDailyPlanOverlay: (Boolean) -> Unit,
+    onSetChatFullscreen: (Boolean) -> Unit,
     onAddFood: (String, Int, String?, String?) -> Unit,
     onRemoveFood: (String) -> Unit,
     onIntroDone: () -> Unit,
@@ -1141,14 +1262,14 @@ fun HomeScreen(
     onOpenAddEntry: () -> Unit,
     onOpenGroceryScan: () -> Unit,
     onOpenMenuScan: () -> Unit,
-    onGenerateMeal: (requiredIngredients: List<String>, targetCalories: Int?, strictOnly: Boolean) -> Unit,
+    onGenerateMeal: (requiredIngredients: List<String>, targetCalories: Int?, strictOnly: Boolean, difficulty: com.matchpoint.myaidietapp.model.RecipeDifficulty, cookTimeMinutes: Int?) -> Unit,
     onGenerateDailyPlan: (targetCalories: Int?, mealCount: Int, savedRecipesOnly: Boolean) -> Unit,
     onCompleteDailyPlanMeal: (mealId: String) -> Unit,
     onOpenDailyPlanMeal: (mealId: String) -> Unit,
     onClearDailyPlan: () -> Unit,
     onSaveDailyPlanMeal: (mealId: String) -> Unit,
     onSaveRecipe: (messageId: String) -> Unit,
-    onConfirmGroceryAdd: () -> Unit,
+    onConfirmGroceryAdd: (caloriesOverride: Int?) -> Unit,
     onDiscardGrocery: () -> Unit,
     onNewChat: () -> Unit,
     onSelectChat: (chatId: String) -> Unit,
@@ -1159,9 +1280,6 @@ fun HomeScreen(
     var chatFullscreen by rememberSaveable { mutableStateOf(false) }
     var historyOpen by rememberSaveable { mutableStateOf(false) }
     var pendingDeleteChatId by rememberSaveable { mutableStateOf<String?>(null) }
-    var showExistingIngredientsPicker by rememberSaveable { mutableStateOf(false) }
-    var showDailyPlanPopup by rememberSaveable { mutableStateOf(false) }
-    var showDailyPlanOverlay by rememberSaveable { mutableStateOf(false) }
     var showScanPicker by rememberSaveable { mutableStateOf(false) }
     var showReviewPrompt by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
@@ -1202,7 +1320,15 @@ fun HomeScreen(
     LaunchedEffect(todayId, state.dailyPlanDayId) {
         if (state.dailyPlanDayId != null && state.dailyPlanDayId != todayId) {
             onClearDailyPlan()
-            showDailyPlanOverlay = false
+            onSetShowDailyPlanOverlay(false)
+        }
+    }
+    // Safety: never allow the daily plan overlay to remain open if there is no active plan to show.
+    LaunchedEffect(state.dailyPlanMeals.size, state.dailyPlanDayId, todayId) {
+        val hasPlanToday = state.dailyPlanMeals.isNotEmpty() &&
+            (state.dailyPlanDayId == null || state.dailyPlanDayId == todayId)
+        if (!hasPlanToday && showDailyPlanOverlay) {
+            onSetShowDailyPlanOverlay(false)
         }
     }
 
@@ -1221,12 +1347,21 @@ fun HomeScreen(
     LaunchedEffect(chatFullscreen, tutorialShouldShow) {
         if (!chatFullscreen && tutorialShouldShow) {
             showHomeTutorial = true
+        } else if (!tutorialShouldShow) {
+            // If the tutorial is not active anymore (done/never requested), ensure we don't
+            // keep a stale overlay around that can block taps after restarts.
+            showHomeTutorial = false
         }
     }
 
     // When chat is fullscreen, Android back should minimize back to normal Home.
     BackHandler(enabled = chatFullscreen) {
         chatFullscreen = false
+    }
+
+    // Export fullscreen state to the app-level so we can suppress the helper overlay.
+    LaunchedEffect(chatFullscreen) {
+        onSetChatFullscreen(chatFullscreen)
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -1239,6 +1374,11 @@ fun HomeScreen(
                     // Move down to align roughly with the action buttons (near "Generate Recipe").
                     .padding(start = 8.dp, top = 124.dp)
                     .onGloballyPositioned { coords -> rectScan = coords.boundsInRoot() }
+                    .helperTarget(
+                        id = "home_ai_evaluate_food",
+                        title = "AI Evaluate Food",
+                        body = "Use your camera to scan a food item or a menu. I will help you judge how well it fits your diet."
+                    )
                     .zIndex(1200f),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -1356,6 +1496,11 @@ fun HomeScreen(
                     .statusBarsPadding()
                     .padding(top = 8.dp, end = 8.dp)
                     .onGloballyPositioned { coords -> rectProfile = coords.boundsInRoot() }
+                    .helperTarget(
+                        id = "home_profile",
+                        title = "Profile",
+                        body = "Open your profile to view your lists, recipes, account, and settings."
+                    )
                     .zIndex(1000f)
                     // Ensure the icon button itself is large (otherwise the Image gets constrained).
                     .size(68.dp)
@@ -1386,7 +1531,12 @@ fun HomeScreen(
                 onClick = onOpenAddEntry,
                 modifier = Modifier
                     .align(Alignment.CenterHorizontally)
-                    .onGloballyPositioned { coords -> rectAdd = coords.boundsInRoot() },
+                    .onGloballyPositioned { coords -> rectAdd = coords.boundsInRoot() }
+                    .helperTarget(
+                        id = "home_add_to_list",
+                        title = "Add To List",
+                        body = "Add ingredients, snacks, or meals. Once they are saved, I can use them in recipes and evaluations."
+                    ),
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
                 contentPadding = PaddingValues(horizontal = 22.dp, vertical = 4.dp)
             ) {
@@ -1415,12 +1565,17 @@ fun HomeScreen(
             // Generate meal (pick from YOUR existing ingredients list)
             TextButton(
                 onClick = {
-                    showExistingIngredientsPicker = true
+                    onSetShowExistingIngredientsPicker(true)
                 },
                 enabled = !state.isProcessing,
                 modifier = Modifier
                     .align(Alignment.CenterHorizontally)
-                    .onGloballyPositioned { coords -> rectGen = coords.boundsInRoot() },
+                    .onGloballyPositioned { coords -> rectGen = coords.boundsInRoot() }
+                    .helperTarget(
+                        id = "home_generate_meal",
+                        title = "Generate Meal",
+                        body = "Pick a few ingredients and I will generate a meal idea or recipe for you."
+                    ),
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
                 contentPadding = PaddingValues(horizontal = 22.dp, vertical = 4.dp)
             ) {
@@ -1446,7 +1601,7 @@ fun HomeScreen(
                 val hasPlanToday = state.dailyPlanMeals.isNotEmpty() && (state.dailyPlanDayId == null || state.dailyPlanDayId == todayId)
                 if (hasPlanToday) {
                     IconButton(
-                        onClick = { showDailyPlanOverlay = true },
+                        onClick = { onSetShowDailyPlanOverlay(true) },
                         modifier = Modifier
                             .align(Alignment.CenterStart)
                             .size(96.dp)
@@ -1466,13 +1621,18 @@ fun HomeScreen(
                         if (tutorialManager.shouldShow() && tutorialManager.step() == 22) {
                             tutorialManager.setStep(23)
                         }
-                        showDailyPlanPopup = true
+                        onSetShowDailyPlanPopup(true)
                     },
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onBackground),
                     contentPadding = PaddingValues(horizontal = 22.dp, vertical = 4.dp),
                     modifier = Modifier
                         .align(Alignment.Center)
                         .onGloballyPositioned { coords -> rectDaily = coords.boundsInRoot() }
+                        .helperTarget(
+                            id = "home_daily_plan",
+                            title = "Daily Plan",
+                            body = "Generate a meal plan for today. You can choose how many meals and whether to use only saved recipes."
+                        )
                         .zIndex(1f)
                 ) {
                     val iconSize = 66.dp
@@ -1717,22 +1877,28 @@ fun HomeScreen(
                 contentPadding = PaddingValues(top = if (chatFullscreen) 0.dp else vineHeight)
             ) {
             // Grocery scan actions (shown inline under the most recent message)
-            state.pendingGrocery?.let { _ ->
+            state.pendingGrocery?.let { pending ->
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
-                            AlphaHitImageButton(
-                                resId = R.drawable.btn_add,
-                                // ~15% smaller than 170x64
-                                size = DpSize(width = 145.dp, height = 54.dp),
-                                contentDescription = "Add",
-                                enabled = !state.isProcessing,
-                                onClick = onConfirmGroceryAdd
-                            )
-                        }
+                        TextButton(
+                            onClick = onDiscardGrocery,
+                            enabled = !state.isProcessing
+                        ) { Text("Not now") }
+
+                        AlphaHitImageButton(
+                            resId = R.drawable.btn_add,
+                            // ~15% smaller than 170x64
+                            size = DpSize(width = 145.dp, height = 54.dp),
+                            contentDescription = "Add",
+                            enabled = !state.isProcessing,
+                            // Calories are already saved into pending.item.estimatedCalories.
+                            // If we ever re-add portion controls, we can pass an override here again.
+                            onClick = { onConfirmGroceryAdd(null) }
+                        )
                     }
                 }
             }
@@ -1788,14 +1954,20 @@ fun HomeScreen(
                             .background(bubbleBrush)
                             .padding(horizontal = 12.dp, vertical = 10.dp)
 
+                        // Recipes should be rendered on a clean white card with black text.
+                        val recipeCardModifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color.White)
+                            .padding(horizontal = 12.dp, vertical = 12.dp)
+
                         if (isRecipe) {
-                            // Chat recipe view: show plain text only (no food icons).
-                            val annotated = MarkdownLite.toAnnotatedString(msg.text)
-                            Text(
-                                text = annotated,
-                                modifier = bubbleModifier,
-                                color = bubbleTextColor,
-                                style = MaterialTheme.typography.bodyMedium.copy(
+                            // Chat recipe view: allow phase images (no food icons).
+                            RecipeMarkdownWithPhases(
+                                text = msg.text,
+                                modifier = recipeCardModifier,
+                                textColor = Color.Black,
+                                textStyle = MaterialTheme.typography.bodyMedium.copy(
                                     fontSize = fontSp.sp,
                                     lineHeight = (fontSp * 1.25f).sp
                                 )
@@ -1884,7 +2056,12 @@ fun HomeScreen(
             onValueChange = { chatInput = it },
             modifier = Modifier
                 .fillMaxWidth()
-                .onGloballyPositioned { coords -> rectChatInput = coords.boundsInRoot() },
+                .onGloballyPositioned { coords -> rectChatInput = coords.boundsInRoot() }
+                .helperTarget(
+                    id = "home_chat_input",
+                    title = "Chat",
+                    body = "Tell me what you ate or what you want to eat. I can add or remove ingredients from your lists, estimate calories for foods you mention, and help keep track of your calories for today."
+                ),
             label = { Text("Chat to the AI Food Coach…") },
             singleLine = true,
             keyboardOptions = KeyboardOptions.Default.copy(imeAction = ImeAction.Send),
@@ -1978,6 +2155,7 @@ fun HomeScreen(
     // Only show when nothing else modal is open, to avoid stacking/confusion.
     val tutorialStep = tutorialManager.step()
     if (showHomeTutorial &&
+        tutorialShouldShow &&
         !chatFullscreen &&
         !showReviewPrompt &&
         !showScanPicker &&
@@ -2214,7 +2392,7 @@ fun HomeScreen(
                         hideNextButton = true,
                         onTargetTap = {
                             tutorialManager.setStep(16)
-                            showExistingIngredientsPicker = true
+                            onSetShowExistingIngredientsPicker(true)
                         }
                     )
                 ),
@@ -2355,21 +2533,21 @@ fun HomeScreen(
             onDismiss = {
                 // During the locked tutorial step, don't allow dismiss.
                 if (!(tutActive && tutStep == 19)) {
-                    showExistingIngredientsPicker = false
+                    onSetShowExistingIngredientsPicker(false)
                 }
             },
-            onGenerate = { picked, targetCalories, strictOnly ->
-                showExistingIngredientsPicker = false
+            onGenerate = { picked, targetCalories, strictOnly, difficulty, cookTimeMinutes ->
+                onSetShowExistingIngredientsPicker(false)
                 if (tutActive && tutStep == 19) {
                     tutorialManager.setStep(20)
                 }
-                onGenerateMeal(picked, targetCalories, strictOnly)
+                onGenerateMeal(picked, targetCalories, strictOnly, difficulty, cookTimeMinutes)
             },
             tutorialStep = tutStep,
             tutorialActive = tutActive,
             onTutorialSkip = {
                 tutorialManager.requestSkipConfirm {
-                    showExistingIngredientsPicker = false
+                    onSetShowExistingIngredientsPicker(false)
                     tutorialManager.markDone()
                 }
             },
@@ -2378,20 +2556,60 @@ fun HomeScreen(
     }
 
     if (showDailyPlanPopup) {
+        var showReplacePlanConfirm by remember { mutableStateOf(false) }
+        var pendingPlanTarget by remember { mutableStateOf<Int?>(null) }
+        var pendingMealCount by remember { mutableStateOf(3) }
+        var pendingSavedOnly by remember { mutableStateOf(false) }
+
+        val hasPlanToday = state.dailyPlanMeals.isNotEmpty() &&
+            (state.dailyPlanDayId == null || state.dailyPlanDayId == todayId)
+
+        if (showReplacePlanConfirm) {
+            AlertDialog(
+                onDismissRequest = { showReplacePlanConfirm = false },
+                title = { Text("Replace today’s plan?") },
+                text = { Text("You already have a daily plan for today. Clear it and generate a new one?") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showReplacePlanConfirm = false
+                            // Clear existing plan, close popup, then generate the new one.
+                            onClearDailyPlan()
+                            onSetShowDailyPlanPopup(false)
+                            onGenerateDailyPlan(pendingPlanTarget, pendingMealCount, pendingSavedOnly)
+                        }
+                    ) { Text("Clear and generate") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showReplacePlanConfirm = false }) { Text("Cancel") }
+                }
+            )
+        }
+
         DailyPlanPopup(
             hasSavedRecipes = state.savedRecipes.isNotEmpty(),
             enabled = !state.isProcessing,
             tutorialManager = tutorialManager,
             onCloseRect = { /* handled internally */ },
-            onDismiss = { showDailyPlanPopup = false },
+            onDismiss = { onSetShowDailyPlanPopup(false) },
             onGenerate = { target, count, savedOnly ->
-                showDailyPlanPopup = false
-                onGenerateDailyPlan(target, count, savedOnly)
+                if (hasPlanToday) {
+                    pendingPlanTarget = target
+                    pendingMealCount = count
+                    pendingSavedOnly = savedOnly
+                    showReplacePlanConfirm = true
+                } else {
+                    onSetShowDailyPlanPopup(false)
+                    onGenerateDailyPlan(target, count, savedOnly)
+                }
             }
         )
     }
 
-    if (showDailyPlanOverlay) {
+    // Only show the overlay when there is an active plan; otherwise it can become a blank tap-blocker.
+    if (showDailyPlanOverlay && state.dailyPlanMeals.isNotEmpty() &&
+        (state.dailyPlanDayId == null || state.dailyPlanDayId == todayId)
+    ) {
         val total = state.dailyPlanTotalCount.coerceAtLeast(state.dailyPlanMeals.size).coerceAtLeast(1)
         val completed = (total - state.dailyPlanMeals.size).coerceAtLeast(0)
         val progressTarget = completed.toFloat() / total.toFloat()
@@ -2408,7 +2626,7 @@ fun HomeScreen(
                 .background(Color.Black.copy(alpha = 0.35f))
                 .zIndex(6000f)
                 .pointerInput(Unit) {
-                    detectTapGestures(onTap = { showDailyPlanOverlay = false })
+                    detectTapGestures(onTap = { onSetShowDailyPlanOverlay(false) })
                 }
         ) {
             Column(
@@ -2418,78 +2636,96 @@ fun HomeScreen(
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                state.dailyPlanMeals.take(3).forEach { m ->
-                    val preview = m.recipeText
-                        .trim()
-                        .replace("\r", "")
-                        .lineSequence()
-                        .take(3)
-                        .joinToString("\n")
-                        .take(180)
-                        .ifBlank { m.title }
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(18.dp))
-                            .background(MaterialTheme.colorScheme.surface)
-                            // Prevent outside-tap dismiss when tapping inside the block.
-                            .pointerInput(Unit) { detectTapGestures(onTap = { /* handled by children */ }) }
-                            .height(86.dp)
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // Prevent outside-tap dismiss when tapping inside the card.
+                        .pointerInput(Unit) { detectTapGestures(onTap = { /* consume */ }) }
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        // 80%: open recipe detail
-                        Box(
-                            modifier = Modifier
-                                .weight(0.8f)
-                                .fillMaxHeight()
-                                .clickable { onOpenDailyPlanMeal(m.id) }
-                                .padding(12.dp)
-                        ) {
-                            Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                        Text(
+                            text = "Today’s Meal Plan",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+
+                        state.dailyPlanMeals.take(3).forEach { m ->
+                            val preview = m.recipeText
+                                .trim()
+                                .replace("\r", "")
+                                .lineSequence()
+                                .take(3)
+                                .joinToString("\n")
+                                .take(180)
+                                .ifBlank { m.title }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                                    .height(86.dp)
+                            ) {
+                                // 80%: open recipe detail
+                                Box(
+                                    modifier = Modifier
+                                        .weight(0.8f)
+                                        .fillMaxHeight()
+                                        .clickable { onOpenDailyPlanMeal(m.id) }
+                                        .padding(12.dp)
                                 ) {
-                                    Text(
-                                        text = m.title.ifBlank { "Meal" },
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "${m.estimatedCalories} cal",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                Text(
-                                    text = preview,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                        // 20%: Done
-                        Box(
-                            modifier = Modifier
-                                .weight(0.2f)
-                                .fillMaxHeight()
-                                .background(Color(0xFF1E88E5))
-                                .clickable {
-                                    onCompleteDailyPlanMeal(m.id)
-                                    if (state.dailyPlanMeals.size <= 1) {
-                                        // Last meal completed: hide overlay; carrot will disappear because list is empty.
-                                        showDailyPlanOverlay = false
+                                    Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceBetween) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = m.title.ifBlank { "Meal" },
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "${m.estimatedCalories} cal",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Text(
+                                            text = preview,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                     }
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text("Done", fontWeight = FontWeight.SemiBold, color = Color.White)
+                                }
+                                // 20%: Done
+                                Box(
+                                    modifier = Modifier
+                                        .weight(0.2f)
+                                        .fillMaxHeight()
+                                        .background(Color(0xFF1E88E5))
+                                        .clickable {
+                                            onCompleteDailyPlanMeal(m.id)
+                                            if (state.dailyPlanMeals.size <= 1) {
+                                                // Last meal completed: hide overlay; carrot will disappear because list is empty.
+                                                onSetShowDailyPlanOverlay(false)
+                                            }
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("Done", fontWeight = FontWeight.SemiBold, color = Color.White)
+                                }
+                            }
                         }
                     }
                 }

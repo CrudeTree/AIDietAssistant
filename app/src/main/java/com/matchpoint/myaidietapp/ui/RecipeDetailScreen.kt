@@ -22,9 +22,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.Button
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -33,12 +36,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.matchpoint.myaidietapp.model.MessageEntry
+import com.matchpoint.myaidietapp.model.MessageSender
 import com.matchpoint.myaidietapp.model.SavedRecipe
 import com.matchpoint.myaidietapp.model.UserProfile
 
@@ -46,6 +54,9 @@ import com.matchpoint.myaidietapp.model.UserProfile
 fun RecipeDetailScreen(
     recipe: SavedRecipe,
     profile: UserProfile,
+    qaMessages: List<MessageEntry> = emptyList(),
+    qaBusy: Boolean = false,
+    onAskQuestion: ((String) -> Unit)? = null,
     onBack: () -> Unit,
     onSave: (() -> Unit)? = null
 ) {
@@ -56,6 +67,29 @@ fun RecipeDetailScreen(
         showIcons = profile.showFoodIcons
     }
     val fontSp = profile.uiFontSizeSp.coerceIn(12f, 40f)
+    val difficultyLabel = remember(recipe.text) {
+        val parenRe = Regex("""^\(\s*(simple|advanced|expert)\s*\)\s*$""", RegexOption.IGNORE_CASE)
+        val lineRe = Regex("""^\s*difficulty\s*:\s*(simple|advanced|expert)\s*$""", RegexOption.IGNORE_CASE)
+        recipe.text
+            .replace("\r", "")
+            .trimStart()
+            .lines()
+            .take(14)
+            .map { it.trim() }
+            .firstNotNullOfOrNull { line ->
+                val m1 = lineRe.matchEntire(line)
+                if (m1 != null) {
+                    val raw = m1.groupValues.getOrNull(1)?.trim().orEmpty()
+                    return@firstNotNullOfOrNull if (raw.isBlank()) null else raw.lowercase().replaceFirstChar { it.uppercase() }
+                }
+                val m2 = parenRe.matchEntire(line)
+                if (m2 != null) {
+                    val raw = m2.groupValues.getOrNull(1)?.trim().orEmpty()
+                    return@firstNotNullOfOrNull if (raw.isBlank()) null else raw.lowercase().replaceFirstChar { it.uppercase() }
+                }
+                null
+            }
+    }
 
     val userHasIconIds = remember(profile.foodItems) {
         val out = linkedSetOf<Int>()
@@ -102,9 +136,21 @@ fun RecipeDetailScreen(
 
                 Text(
                     text = recipe.title.ifBlank { "Recipe" },
-                    style = MaterialTheme.typography.headlineSmall.copy(fontSize = (fontSp + 6f).coerceAtMost(46f).sp),
-                    fontWeight = FontWeight.Bold
+                    style = MaterialTheme.typography.headlineSmall.copy(fontSize = (fontSp + 10f).coerceAtMost(54f).sp),
+                    fontWeight = FontWeight.Bold,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
                 )
+                if (!difficultyLabel.isNullOrBlank()) {
+                    Text(
+                        text = "Difficulty: $difficultyLabel",
+                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = (fontSp + 1f).sp),
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
 
                 if (showIcons && have.isNotEmpty()) {
                     Row(
@@ -142,19 +188,106 @@ fun RecipeDetailScreen(
 
                 Spacer(modifier = Modifier.height(4.dp))
 
-                if (showIcons) {
-                    RecipeTextWithIngredientIcons(
-                        text = recipe.text,
-                        ingredients = recipe.ingredients,
-                        iconSize = (((fontSp + 4f) * 2f) * 0.8f).sp,
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = fontSp.sp, lineHeight = (fontSp * 1.35f).sp),
-                        includeAllIconMatchesInText = true
-                    )
-                } else {
+                RecipeTextWithPhasesAndIngredientIcons(
+                    text = recipe.text,
+                    ingredients = recipe.ingredients,
+                    iconSize = (((fontSp + 4f) * 2f) * 0.8f).sp,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(
+                        fontSize = fontSp.sp,
+                        lineHeight = (fontSp * 1.35f).sp
+                    ),
+                    includeAllIconMatchesInText = true,
+                    showIngredientIcons = showIcons,
+                    textColor = Color.Black,
+                    renderTitle = false,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(18.dp))
+                        .background(Color.White)
+                        .padding(14.dp)
+                )
+
+                if (onAskQuestion != null) {
+                    Spacer(modifier = Modifier.height(6.dp))
+
                     Text(
-                        text = recipe.text,
-                        style = MaterialTheme.typography.bodyLarge.copy(fontSize = fontSp.sp, lineHeight = (fontSp * 1.35f).sp)
+                        text = "Questions",
+                        style = MaterialTheme.typography.titleMedium.copy(fontSize = (fontSp + 2f).sp),
+                        fontWeight = FontWeight.SemiBold
                     )
+
+                    if (qaMessages.isEmpty()) {
+                        Text(
+                            text = "Ask anything about this recipe (substitutions, timing, technique, etc.).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            for (m in qaMessages.takeLast(80)) {
+                                val isUser = m.sender == MessageSender.USER
+                                val bubbleBg = if (isUser) Color(0xFFE8F5E9) else Color(0xFFF2F2F2)
+                                val align = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
+                                androidx.compose.foundation.layout.Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = align
+                                ) {
+                                    Surface(
+                                        shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+                                        color = bubbleBg,
+                                        tonalElevation = 0.dp
+                                    ) {
+                                        Text(
+                                            text = m.text,
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = fontSp.sp),
+                                            color = Color.Black,
+                                            modifier = Modifier.padding(12.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    var question by remember(recipe.id) { mutableStateOf("") }
+                    OutlinedTextField(
+                        value = question,
+                        onValueChange = { question = it },
+                        enabled = !qaBusy,
+                        placeholder = { Text("Ask a question…") },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.Black,
+                            unfocusedTextColor = Color.Black,
+                            disabledTextColor = Color.Black.copy(alpha = 0.55f),
+                            cursorColor = Color.Black,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.22f),
+                            focusedContainerColor = Color.White,
+                            unfocusedContainerColor = Color.White,
+                            disabledContainerColor = Color.White,
+                            focusedPlaceholderColor = Color(0xFF555555),
+                            unfocusedPlaceholderColor = Color(0xFF555555),
+                            disabledPlaceholderColor = Color(0xFF777777)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Button(
+                        onClick = {
+                            val q = question.trim()
+                            if (q.isNotBlank()) {
+                                question = ""
+                                onAskQuestion(q)
+                            }
+                        },
+                        enabled = !qaBusy && question.trim().isNotBlank(),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = if (qaBusy) "Asking…" else "Ask",
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
 
                 // Add some space so long recipes don't hide behind the save button.

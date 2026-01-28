@@ -114,7 +114,24 @@ data class AnalyzeFoodResponse(
     val estimatedProteinG: Int? = null,
     val estimatedCarbsG: Int? = null,
     val estimatedFatG: Int? = null,
-    val ingredientsText: String? = null
+    val ingredientsText: String? = null,
+    /**
+     * Calories context helpers (optional; mainly for AI Evaluate Food).
+     * - PACKAGED: use caloriesPerServing (+ servingsPerContainer when readable)
+     * - PLATED: caloriesTotal is for the full pictured plate/bowl
+     */
+    val portionKind: String? = null, // "PACKAGED" | "PLATED" | "UNKNOWN"
+    val servingSizeText: String? = null,
+    val caloriesPerServing: Int? = null,
+    val servingsPerContainer: Double? = null,
+    val caloriesTotal: Int? = null,
+    val caloriesLow: Int? = null,
+    val caloriesHigh: Int? = null,
+    /**
+     * Suggested category for putting the item into the user's list.
+     * Values: "INGREDIENT" | "SNACK" | "MEAL"
+     */
+    val suggestedCategory: String? = null
 )
 
 /**

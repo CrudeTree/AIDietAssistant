@@ -11,9 +11,12 @@ import com.matchpoint.myaidietapp.model.ChatSession
 import com.matchpoint.myaidietapp.model.MessageEntry
 import com.matchpoint.myaidietapp.model.MessageLog
 import com.matchpoint.myaidietapp.model.ScheduledMealDay
+import com.matchpoint.myaidietapp.model.SubscriptionTier
 import com.matchpoint.myaidietapp.model.UserProfile
 import com.matchpoint.myaidietapp.model.WeightUnit
 import com.matchpoint.myaidietapp.model.RecipeTitleFontStyle
+import android.util.Log
+import kotlin.reflect.full.memberProperties
 import kotlinx.coroutines.tasks.await
 
 private const val USERS_COLLECTION = "users"
@@ -35,7 +38,74 @@ class UserRepository(
     }
 
     suspend fun saveUserProfile(profile: UserProfile) {
-        userDoc.set(profile).await()
+        // IMPORTANT:
+        // Firestore rules treat `subscriptionTier` and `subscriptionTierUpdatedAt` as server-managed.
+        // Many call sites use `saveUserProfile()` as a "full overwrite", so if we accidentally send
+        // `subscriptionTierUpdatedAt = null` (or change the tier), the write will be rejected and the
+        // app can get stuck on startup.
+        //
+        // To keep the client UX robust, we preserve those fields from the existing document (if any)
+        // and then write the updated profile.
+        db.runTransaction { tx ->
+            val snap = tx.get(userDoc)
+            val existingTierAny = snap.get("subscriptionTier")
+            val existingTierRaw = snap.getString("subscriptionTier")
+            val existingTier = existingTierRaw?.let { raw ->
+                runCatching { SubscriptionTier.valueOf(raw) }.getOrNull()
+            }
+            val existingTierUpdatedAt = snap.getTimestamp("subscriptionTierUpdatedAt")
+
+            Log.w(
+                "UserRepo",
+                "saveUserProfile(): exists=${snap.exists()} " +
+                    "existingTierAny=${existingTierAny?.let { it::class.java.simpleName + ":" + it.toString() } ?: "null"} " +
+                    "existingTierRaw=$existingTierRaw existingTierEnum=$existingTier " +
+                    "existingTierUpdatedAt=${existingTierUpdatedAt?.toDate() ?: "null"} " +
+                    "writeTier=${profile.subscriptionTier} writeTierUpdatedAt=${profile.subscriptionTierUpdatedAt?.toDate() ?: "null"}"
+            )
+
+            val safe = if (snap.exists()) {
+                profile.copy(
+                    subscriptionTier = existingTier ?: profile.subscriptionTier,
+                    subscriptionTierUpdatedAt = existingTierUpdatedAt ?: profile.subscriptionTierUpdatedAt
+                )
+            } else {
+                profile
+            }
+
+            Log.w(
+                "UserRepo",
+                "saveUserProfile(): safeTier=${safe.subscriptionTier} safeTierUpdatedAt=${safe.subscriptionTierUpdatedAt?.toDate() ?: "null"}"
+            )
+
+            // Build a Firestore-friendly map:
+            // - Serialize enums as strings (so rules comparisons are stable)
+            // - EXCLUDE server-managed fields entirely (so we never "touch" them from the client)
+            //
+            // NOTE:
+            // We exclude BOTH subscriptionTier and subscriptionTierUpdatedAt. Even "setting FREE" can be
+            // rejected for older/migrated docs (e.g., tier stored as numeric), and we never want a client
+            // profile save to be blocked by billing tier enforcement. The app can still READ the tier.
+            val exclude = setOf("subscriptionTier", "subscriptionTierUpdatedAt")
+            val map = HashMap<String, Any?>()
+            for (p in UserProfile::class.memberProperties) {
+                val key = p.name
+                if (key in exclude) continue
+                val v = runCatching { p.get(safe) }.getOrNull()
+                map[key] = when (v) {
+                    is Enum<*> -> v.name
+                    else -> v
+                }
+            }
+
+            if (snap.exists()) {
+                // Merge so omitted fields aren't wiped, especially server-managed ones.
+                tx.set(userDoc, map, SetOptions.merge())
+            } else {
+                tx.set(userDoc, map)
+            }
+            null
+        }.await()
     }
 
     suspend fun updateNextTimes(nextCheckInAt: Long?, nextMealAt: Long?) {

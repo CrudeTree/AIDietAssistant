@@ -57,10 +57,12 @@ import com.matchpoint.myaidietapp.model.WeightUnit
 fun SettingsScreen(
     profile: UserProfile,
     tutorialManager: HomeTutorialManager,
+    helperEnabled: Boolean,
     isProcessing: Boolean,
     errorText: String?,
     onBack: () -> Unit,
     onGoHome: () -> Unit,
+    onToggleHelperEnabled: (Boolean) -> Unit,
     onToggleShowFoodIcons: (Boolean) -> Unit,
     onToggleShowWallpaperFoodIcons: (Boolean) -> Unit,
     onToggleShowVineOverlay: (Boolean) -> Unit,
@@ -202,6 +204,25 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .helperTarget(
+                        id = "settings_helper_toggle",
+                        title = "Helper",
+                        body = "Turn the helper on or off. When it is on, tap the helper on any screen, then tap something to learn what it does."
+                    ),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "Show helper", style = MaterialTheme.typography.bodyMedium)
+                Switch(
+                    checked = helperEnabled,
+                    onCheckedChange = { onToggleHelperEnabled(it) },
+                    enabled = !isProcessing
+                )
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),

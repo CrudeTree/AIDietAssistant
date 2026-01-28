@@ -136,6 +136,11 @@ fun ProfileScreen(
                         .offset(x = 16.dp)
                         .size(98.dp)
                         .onGloballyPositioned { coords -> rectSettings = coords.boundsInRoot() }
+                        .helperTarget(
+                            id = "profile_settings",
+                            title = "Settings",
+                            body = "Change app preferences like display, diet, fasting, and the helper."
+                        )
                 ) {
                     Image(
                         painter = painterResource(id = R.drawable.gear),
@@ -211,7 +216,15 @@ fun ProfileScreen(
                         .width(cellW),
                     contentAlignment = Alignment.Center
                 ) {
-                    Box(modifier = Modifier.onGloballyPositioned { coords -> rectUpgrade = coords.boundsInRoot() }) {
+                    Box(
+                        modifier = Modifier
+                            .onGloballyPositioned { coords -> rectUpgrade = coords.boundsInRoot() }
+                            .helperTarget(
+                                id = "profile_upgrade",
+                                title = "Upgrade",
+                                body = "View subscription options. Upgrading increases daily AI limits."
+                            )
+                    ) {
                     AlphaHitImageButton(
                         resId = R.drawable.upgrade,
                         size = DpSize(width = 383.dp, height = 144.dp),
@@ -270,7 +283,15 @@ fun ProfileScreen(
                         .width(cellW),
                     contentAlignment = Alignment.Center
                 ) {
-                    Box(modifier = Modifier.onGloballyPositioned { coords -> rectRecipes = coords.boundsInRoot() }) {
+                    Box(
+                        modifier = Modifier
+                            .onGloballyPositioned { coords -> rectRecipes = coords.boundsInRoot() }
+                            .helperTarget(
+                                id = "profile_recipes",
+                                title = "Recipes",
+                                body = "View all recipes you’ve saved. You can open them any time and use them in your Daily Plan."
+                            )
+                    ) {
                     AlphaHitImageButton(
                         resId = R.drawable.btn_recipes,
                         size = recipeBtnSize,
@@ -295,7 +316,12 @@ fun ProfileScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         // Use the whole column as the "Lists" highlight target for the tutorial.
-                        .onGloballyPositioned { coords -> rectLists = coords.boundsInRoot() },
+                        .onGloballyPositioned { coords -> rectLists = coords.boundsInRoot() }
+                        .helperTarget(
+                            id = "profile_lists",
+                            title = "Your lists",
+                            body = "Ingredients: Your ingredient list for recipes and evaluations.\n\nSnacks: Foods you snack on so I can help track nutrition.\n\nMeals: Meals you have eaten so I can help track your day."
+                        ),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     AlphaHitImageButton(

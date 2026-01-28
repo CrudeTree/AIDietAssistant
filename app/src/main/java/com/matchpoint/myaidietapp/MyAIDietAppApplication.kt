@@ -11,7 +11,7 @@ class MyAIDietAppApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         FirebaseApp.initializeApp(this)
-        AppCheckInstaller.install()
+        AppCheckInstaller.install(this)
 
         // RevenueCat is the source of truth for subscription status.
         val apiKey = BuildConfig.REVENUECAT_API_KEY

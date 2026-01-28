@@ -20,9 +20,14 @@ service cloud.firestore {
       allow read: if isOwner(userId);
 
       // Users can update their profile, but must NOT be able to modify server-managed fields.
-      // Server-managed fields: subscriptionTier
+      // Server-managed fields: subscriptionTier (+ subscriptionTierUpdatedAt)
       allow update: if isOwner(userId)
-        && request.resource.data.subscriptionTier == resource.data.subscriptionTier;
+        // Never allow the client to write server-managed billing fields.
+        //
+        // We use request.writeFields (the actual fields being written) instead of comparing
+        // request.resource.data vs resource.data, because set(..., merge()) writes should not be
+        // rejected just because they omit server-managed fields.
+        && !request.writeFields.hasAny(['subscriptionTier', 'subscriptionTierUpdatedAt']);
 
       // Allow the user to delete their own profile document (note: subcollections won't be deleted automatically).
       allow delete: if isOwner(userId);
